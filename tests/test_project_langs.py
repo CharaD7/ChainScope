@@ -1,4 +1,5 @@
 import json
+import signal
 
 from core.indexer import Indexer
 from core.web3.project_langs import (
@@ -155,6 +156,37 @@ def test_ton_extractor_tracks_recv_internal_storage_and_sends():
     assert meta["ton_accept_message"] is True
     assert "send_raw_message" in meta["transfer_sinks"]
     assert any(e["relation"] == "writes_state" for e in result.edges)
+
+
+def test_ton_extractor_handles_func_builder_chains_without_regex_backtracking():
+    src = (
+        """
+() send_ton(slice destination_address, int amount, cell payload, int mode) impure inline {
+    var msg =
+        begin_cell()
+"""
+        + "            .store_uint(0x10, 6)\n" * 200
+        + """
+        .end_cell();
+    send_raw_message(msg, mode);
+}
+"""
+    ).encode()
+
+    def _alarm(_signum, _frame):
+        raise AssertionError("TON FunC extraction timed out")
+
+    previous = signal.signal(signal.SIGALRM, _alarm)
+    signal.alarm(2)
+    try:
+        result = TonExtractor().extract_from_source(src, "ton_utils.fc")
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+    meta = _meta_for(result, "send_ton")
+    assert meta["language"] == "ton"
+    assert "send_raw_message" in meta["transfer_sinks"]
 
 
 def test_tact_extractor_tracks_receive_methods_and_bounce():

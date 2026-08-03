@@ -846,7 +846,7 @@ class SorobanExtractor(BaseExtractor):
                     conditions.append(_text(token_tree).strip("()"))
         # Also collect if-panic patterns
         body_text = _text(body)
-        for m in re.finditer(r'if\s+(.+?)\s*\{[^}]*panic', body_text):
+        for m in re.finditer(r'(?m)\bif\s+([^\n{]+)\s*\{[^}]*\bpanic', body_text):
             conditions.append(m.group(1).strip())
         return conditions
 
@@ -970,7 +970,7 @@ class SorobanExtractor(BaseExtractor):
                     if pname in ("env", "self"):
                         continue
                     # Check if param appears in storage set key
-                    if re.search(rf'\.set\s*\(\s*&?.*{pname}', body_text):
+                    if re.search(rf'\.set\s*\(\s*&?[^;\n)]*\b{re.escape(pname)}\b', body_text):
                         if not func["has_auth"]:
                             warnings.append({
                                 "type": "unprotected_storage_key",

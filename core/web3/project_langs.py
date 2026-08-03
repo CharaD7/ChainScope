@@ -653,7 +653,7 @@ class TonExtractor(TextProjectExtractor):
     def _state_declarations(self, text: str, scope: str) -> list[str]:
         names = []
         # Tact fields: `nonceStatus: map<Int, Int>;`
-        for m in re.finditer(r"(?m)^\s*([A-Za-z_]\w*)\s*:\s*(?!Int\s*=|String\s*=|Bool\s*=)[^;{}]+\s*;", text):
+        for m in re.finditer(r"(?m)^\s*([A-Za-z_]\w*)\s*:\s*(?!Int\s*=|String\s*=|Bool\s*=)[^;{}\n]+\s*;", text):
             name = m.group(1)
             if name not in {"import", "message", "contract", "const"}:
                 names.append(name)
@@ -668,23 +668,53 @@ class TonExtractor(TextProjectExtractor):
 
     def _func_functions(self, text: str, file_path: str, containers: list[dict]) -> list[FunctionSpan]:
         spans = []
-        pattern = re.compile(
-            r"(?m)^\s*(?!if\b|elseif\b|else\b|do\b|until\b|while\b|return\b)"
-            r"(?P<sig>[^#/\n;{}][^\n;{}]*?\s+(?P<name>~?[A-Za-z_][\w$?]*)\s*\([^;\n{}]*\)\s*(?:impure|inline|method_id|asm|forall|[<>\w\s,.$?~]*)*)\{"
+        # Keep FunC signature matching line-bounded. The previous whole-file
+        # regex used nested optional/repeated groups and could catastrophically
+        # backtrack on normal FunC code with many calls before a later "{",
+        # causing small TON repos to hang during indexing.
+        signature_re = re.compile(
+            r"^\s*(?!if\b|elseif\b|else\b|do\b|until\b|while\b|return\b)"
+            r"(?P<sig>"
+            r"(?:\([^{}\n;]*\)|[~A-Za-z_][\w$?~<>]*)"
+            r"\s+(?P<name>~?[A-Za-z_][\w$?]*)"
+            r"\s*\([^{}\n;]*\)"
+            r"\s*(?:impure|inline|forall|asm|method_id(?:\s*\([^)]*\))?|[<>\w\s,.$?~]*)*"
+            r")$"
         )
-        for m in pattern.finditer(text):
+
+        offset = 0
+        for line in text.splitlines(keepends=True):
+            brace_col = line.find("{")
+            if brace_col < 0:
+                offset += len(line)
+                continue
+
+            before_brace = line[:brace_col]
+            stripped = before_brace.lstrip()
+            if not stripped or stripped.startswith(("#", ";;", "//")):
+                offset += len(line)
+                continue
+
+            m = signature_re.match(before_brace)
+            if not m:
+                offset += len(line)
+                continue
+
             name = m.group("name").lstrip("~")
             if name in CONTROL_CALLS:
+                offset += len(line)
                 continue
-            body, end = _brace_body(text, m.end() - 1)
+
+            body, end = _brace_body(text, offset + brace_col)
             sig = m.group("sig").strip()
             vis = "external" if name in self.FUNC_ENTRY_NAMES else ("public" if name.startswith("get_") else "private")
             spans.append(FunctionSpan(
                 name=name, visibility=vis,
-                start_line=_line_for_offset(text, m.start()),
+                start_line=_line_for_offset(text, offset),
                 end_line=_line_for_offset(text, end),
                 signature=sig, body=body, scope=Path(file_path).stem,
             ))
+            offset += len(line)
         return spans
 
     def _tact_functions(self, text: str, file_path: str, containers: list[dict]) -> list[FunctionSpan]:
@@ -850,7 +880,7 @@ class XdrExtractor(TextProjectExtractor):
         patterns = [
             ("struct", re.compile(r"(?m)^\s*struct\s+([A-Za-z_]\w*)\s*\{")),
             ("enum", re.compile(r"(?m)^\s*enum\s+([A-Za-z_]\w*)\s*\{")),
-            ("union", re.compile(r"(?m)^\s*union\s+([A-Za-z_]\w*)\b[^{;]*\{")),
+            ("union", re.compile(r"(?m)^\s*union\s+([A-Za-z_]\w*)\b[^{;\n]*\{")),
         ]
         for kind, pat in patterns:
             for m in pat.finditer(text):
@@ -921,8 +951,8 @@ class TypeScriptExtractor(TextProjectExtractor):
         seen: set[int] = set()
         patterns = [
             re.compile(r"(?m)^\s*(export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\("),
-            re.compile(r"(?m)^\s*(export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>"),
-            re.compile(r"(?m)^\s*(?:(public|private|protected)\s+)?(?:static\s+)?(?:async\s+)?([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*(?::[^={]+)?\s*\{"),
+            re.compile(r"(?m)^\s*(export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^\n)]*\)|[A-Za-z_$][\w$]*)\s*=>"),
+            re.compile(r"(?m)^\s*(?:(public|private|protected)\s+)?(?:static\s+)?(?:async\s+)?([A-Za-z_$][\w$]*)\s*\([^\n)]*\)\s*(?::[^\n={]+)?\s*\{"),
         ]
         for pat in patterns:
             for m in pat.finditer(text):
