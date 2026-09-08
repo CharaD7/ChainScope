@@ -583,3 +583,22 @@ pytest -q
 Result at the time of this README update:
 
 `565 passed`
+
+## Bug-bounty hunt loop (cs_fetch / cs_discover / cs_scan)
+
+Three local-first helpers add a target-selection + ingestion layer for bug bounty hunting:
+
+- **`cs_scan`** — rank Immunefi programs into a **thin-audit shortlist** (recent, on-chain,
+  mainnet/Base/Arb in-scope smart-contract assets), where unknown bugs actually live.
+  ```
+  python cs_scan.py --recent-since 2025-06-01 --top 20
+  ```
+- **`cs_discover <slug>`** — list a program's in-scope smart-contract assets with their added date
+  (robust against the double-escaped, client-rendered scope page).
+- **`cs_fetch <chain>:<address>`** — pull Sourcify-verified deployed source and build a graph from
+  it, so a contract can be indexed even when its repo is private / deployments-only.
+  ```
+  python cs_fetch.py 1:0x... --db graph.db
+  ```
+
+Typical flow: `cs_scan` -> `cs_discover <slug>` -> `cs_fetch <chain>:<addr>` -> `cs_summary/cs_trace/cs_cross --db graph.db`
