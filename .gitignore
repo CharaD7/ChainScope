@@ -13,3 +13,5 @@ tests/.DS_Store
 
 # ChainScope fetch materialisation output
 .chainsource/
+# cs_target fetched source
+/target_*/

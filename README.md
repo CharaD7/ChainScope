@@ -602,3 +602,44 @@ Three local-first helpers add a target-selection + ingestion layer for bug bount
   ```
 
 Typical flow: `cs_scan` -> `cs_discover <slug>` -> `cs_fetch <chain>:<addr>` -> `cs_summary/cs_trace/cs_cross --db graph.db`
+
+## cs_target — Keizo-style target scorer (the "where to point AI" engine)
+
+**Inspiration.** The methodology is inspired by the approach of **KeiZo_Zo** (see his
+AI-led Immunefi hunt: 8 valid reports incl. 2 Criticals and 2 Highs, one earning a
+$20k bounty). His edge is not magic — it is pattern-recognition from volume: find the
+**fresh, tiny, self-written (not an audited fork) protocol**, then point AI at the
+**permissionless money path**. `cs_target` encodes that pattern so it is systematic
+rather than a personal intuition.
+
+`cs_target` ranks a program's in-scope contracts by *attack surface* using four signals:
+
+1. **Permissionless money path** — a contract whose external/public function moves funds
+   (`deposit`/`withdraw`/`mint`/`burn`/`transfer`/`claim`/`.call{value}`/`.delegatecall`)
+   and is **not** gated by a role/auth/pause modifier. This is the cash an attacker can reach.
+2. **Freshness** — recently added to scope => recently deployed => fewer audit cycles.
+3. **Low audit** — few/no audits for the program.
+4. **Reachability** — on-chain, fork-able (mainnet/Base/Arb), not a private/deployments repo.
+
+```
+python cs_target.py <slug> --max-fetch 8        # scan the freshest N in-scope contracts
+python cs_target.py <slug> --recent-since 2025-01-01 --json
+```
+
+For each contract it fetches the Sourcify-verified source (`cs_fetch` path), scans the
+functions, and emits a `target_score` where `1 = fresh + low-audit + has a permissionless
+money path` (the **)**
+
+```
+$ python cs_target.py veda --max-fetch 5
+  **LiquidUSD - accountant  score=1 perm_money=True (1 fns) audits=1 added=2026-03-30
+  **LiquidUSD - boring_queue score=1 perm_money=True (2 fns) audits=1 added=2026-03-30
+  **LiquidUSD - teller      score=1 perm_money=True (3 fns) audits=1 added=2026-03-30
+```
+
+Then feed the flagged contract to `cs_fetch` + `cs_summary/cs_trace/cs_cross` and build a
+fork PoC. `cs_target` is a structural scorer, not a verdict: manual exploitability is
+still required.
+
+> Methodology credit: inspired by **KeiZo_Zo**'s AI-led, long-tail, thin-audit,
+> permissionless-money-path approach to bug bounty hunting.
