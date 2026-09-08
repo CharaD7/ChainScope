@@ -10,3 +10,6 @@ AGENTS.md
 /.venv
 tests/.DS_Store
 .DS_Store
+
+# ChainScope fetch materialisation output
+.chainsource/
