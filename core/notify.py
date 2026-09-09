@@ -30,6 +30,7 @@ import sys
 import typing
 import urllib.error
 import urllib.request
+from email.message import EmailMessage
 
 
 def _default_log() -> str:
@@ -63,17 +64,17 @@ def _send_email(subject: str, body: str) -> None:
         raise RuntimeError("SMTP_HOST and SMTP_TO required for email notifications")
     port = int(os.environ.get("SMTP_PORT", "587"))
     frm = os.environ.get("SMTP_FROM", "").strip() or user
-    msg = (
-        f"From: {frm}\r\nTo: {', '.join(to)}\r\n"
-        f"Subject: {subject}\r\nMIME-Version: 1.0\r\n"
-        f"Content-Type: text/plain; charset=utf-8\r\n\r\n{body}\r\n"
-    )
+    msg = EmailMessage()
+    msg["From"] = frm
+    msg["To"] = ", ".join(to)
+    msg["Subject"] = subject
+    msg.set_content(body)
     if port == 465:
         # implicit SSL/TLS (Bird / port 465)
         with smtplib.SMTP_SSL(host, port) as server:
             if user and pw:
                 server.login(user, pw)
-            server.sendmail(frm, to, msg)
+            server.send_message(msg)
         return
     with smtplib.SMTP(host, port) as server:
         server.ehlo()
@@ -82,7 +83,7 @@ def _send_email(subject: str, body: str) -> None:
             server.ehlo()
         if user and pw:
             server.login(user, pw)
-        server.sendmail(frm, to, msg)
+        server.send_message(msg)
 
 
 def _log_locally(subject: str, body: str) -> None:
