@@ -164,6 +164,13 @@ def watch(
                 "are short and findings flood in fast."
             )
             notify.notify(subject, body)
+        elif os.environ.get("NOTIFY_HEARTBEAT", "").strip() not in ("", "0", "false"):
+            open_list = ";\n".join(f"- {c['name']} [{c['source']}]" for c in opened if _is_open(c.get("status") or ""))
+            notify.local(
+                "cs_watch - still watching",
+                f"cs_watch is alive (polling every interval).\nOpen right now: {sum(1 for c in opened if _is_open(c.get('status') or ''))}"
+                + (f"\n{open_list}" if open_list else "\n(none open)"),
+            )
         summary = (
             f"[cs_watch] open now: {sum(1 for c in opened if _is_open(c.get('status') or ''))}"
             f" | new since last: {len(fresh)}"
