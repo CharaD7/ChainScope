@@ -705,3 +705,20 @@ enable, default on). Enable it in `run_watch.sh`:
 Then `cs_watch` shows a visible desktop popup the moment a fresh competition opens — works without a
 verified Bird sender or any webhook URL. `run_watch.sh` already wires the session env best-effort and is
 kept out of git (it contains your Bird `bk_` key).
+
+## cs_audits — check prior audits before submitting (the "already audited" gate)
+
+Audited/known/intended issues are ineligible on most programs. A prior audit can either (a) already
+flag the finding (-> OOS as "unfixed audit issue") or (b) document the behavior as intended (-> "by
+design"). Run this BEFORE investing in a contract or submitting:
+
+    python cs_audits.py olympus                          # list the program's prior audit reports
+    python cs_audits.py olympus --grep setTreasuryBorrower   # grep the audit PDFs for a target fn
+
+It follows the program's "Previous Audits" links (including an external docs page), downloads +
+pdftotext's the reports (cached in /tmp/cs_audits/<slug>), and prints any mention of your target
+with context. Example that caught a trap: Monocooler's `setTreasuryBorrower` was already audited +
+access-tested (Nethermind `test_access_setTreasuryBorrower`) and documented-intentional, so it is
+NOT rewardable. Requires `pdftotext` (poppler-utils). Note: github.com `.../blob/*.pdf` links are
+HTML pages, not raw PDFs - they are listed but not searchable; raw storage.googleapis/`/assets/files`
+links download fine.
