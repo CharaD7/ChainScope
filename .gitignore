@@ -15,3 +15,7 @@ tests/.DS_Store
 .chainsource/
 # cs_target fetched source
 /target_*/
+
+# ChainScope local graph artifacts
+graph.db
+*.db
