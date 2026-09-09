@@ -679,3 +679,16 @@ never commit the key):
 Alternatively use a webhook (Discord/Slack/Telegram) via `NOTIFY_WEBHOOK_URL`, or leave both
 unset to fall back to ~/.chainscope/notifications.log. The port 465 path uses `smtplib.SMTP_SSL`;
 587/2525 use STARTTLS.
+
+## cs_re — reverse-engineer source-blocked contracts
+
+Many targets (custom proxies, bridges, or contracts whose Sourcify source is only commented-out
+stubs) hide logic in bytecode. `cs_re` fetches the bytecode for a `chain:addr`, resolves a proxy
+implementation, enumerates selectors, and classifies functions into MONEY / AUTH / view.
+
+    python cs_re.py 1:0x8236a87084f8b84306f72007f36f2618a5634494 --impl
+
+Notes: simple direct contracts classify well (PUSH4 dispatcher). Custom/non-EIP1967 proxies and
+some optimized dispatchers don't PUSH4-pack selectors use `cast implementation <addr>` +
+`cast selectors` / `cast 4byte <selector>` / `cast disassemble` for those — see the LBTC worked
+example in the campaign. Use `cs_re` first, fall back to `cast` for stubborn proxies.
