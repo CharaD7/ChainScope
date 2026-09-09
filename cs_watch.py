@@ -78,25 +78,32 @@ def _fetch_immunefi() -> list[dict[str, typing.Any]]:
 def _fetch_code4rena() -> list[dict[str, typing.Any]]:
     raw = _get("https://code4rena.com/audits")
     out: list[dict[str, typing.Any]] = []
-    # The page embeds contest objects as "<hexid>:{\"auditType\":...,\"status\":...,\"title\":...}".
-    # Parse each such object, keep those with a status + title, and normalise status.
-    obj_re = re.compile(r'"[0-9a-fA-F]+":(\{"[^{}]*"status"[^{}]*\}|"[^"]*":.*?"title"[^{}]*\})')
-    for m in re.finditer(r'\{[^{}]*"(status|title|startTime)"[^{}]*\}', raw):
+    # The page embeds the authoritative "Active" / "Upcoming" contest arrays. Pull those as JSON
+    # and use them as the source of truth (avoids false positives from unrelated page JSON).
+    for key in ("Active", "Upcoming", "Report in progress", "Completed"):
+        m = re.search(re.escape('"%s":[' % key), raw)
+        if not m:
+            continue
+        start = m.end() - 1
+        depth, i = 0, start
+        while i < len(raw):
+            c = raw[i]
+            if c == "[":
+                depth += 1
+            elif c == "]":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        arr = raw[start:i + 1]
         try:
-            d = json.loads(m.group(0))
+            contests = json.loads(arr)
         except Exception:  # noqa: BLE001
             continue
-        st = d.get("status", "")
-        ti = d.get("title", "")
-        if not (st and ti):
-            continue
-        out.append({"slug": re.sub(r'[^a-z0-9]+', '-', ti.lower()).strip('-'),
-                    "name": ti, "status": st, "source": "code4rena"})
-    if not out:
-        # fallback: textual status markers near a title
-        for m in re.finditer(r'([A-Za-z][A-Za-z0-9 .\-&;]{2,40})\s*(?:<[^>]+>)*\s*(Report in progress|Live|in progress|Completed|Active)', raw):
-            out.append({"slug": re.sub(r'[^a-z0-9]+', '-', m.group(1).lower()).strip('-'),
-                        "name": m.group(1).strip(), "status": m.group(2).strip(), "source": "code4rena"})
+        for c in contests:
+            if isinstance(c, dict) and c.get("title"):
+                out.append({"slug": re.sub(r'[^a-z0-9]+', '-', c["title"].lower()).strip('-'),
+                            "name": c["title"], "status": key, "source": "code4rena"})
     return out
 
 
