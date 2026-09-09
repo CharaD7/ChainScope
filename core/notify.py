@@ -118,6 +118,13 @@ def _dunst(subject: str, body: str) -> bool:
     return False
 
 
+def local(subject: str, body: str) -> bool:
+    """Local-only notification: dunst popup + log. No webhook/SMTP (no email spam for heartbeats)."""
+    _dunst(subject, body)
+    _log_locally(subject, body)
+    return False
+
+
 def notify(subject: str, body: str) -> bool:
     """Send a notification via webhook/SMTP (best-effort) and ALWAYS fire a dunst popup + log.
 
