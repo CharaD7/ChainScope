@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""Watch for NEWLY-OPENED fresh-code audit competitions and notify.
+
+This is the "out-of-the-box" companion to ``cs_scan``/``cs_target``: those hunt *existing*
+Immunefi bug bounties (which are audited majors). Fresh, thin-audit code that the Keizo
+method favours usually appears as *time-boxed audit competitions* (Code4rena, Sherlock,
+Cantina, Immunefi audit-competitions). ``cs_watch`` polls those sources, remembers which
+contests it has already reported, and notifies when a NEW one opens so you can audit it
+inside its window before it is flooded with findings.
+
+    python cs_watch.py --once                 # check now, notify on new opens, exit
+    python cs_watch.py --interval 1800        # poll every 30 minutes (default 30m)
+    python cs_watch.py --json                 # print the detected set as JSON
+
+Notifications: webhook (Discord/Slack/Telegram) or SMTP email via ``core/notify``; if
+neither is configured it appends to ~/.chainscope/notifications.log and prints.
+
+State is persisted in ~/.chainscope/watch_state.json so a new contest is only reported once.
+"""
+from __future__ import annotations
+
+import json
+import os
+import pathlib
+import re
+import sys
+import time
+import typing
+import urllib.error
+import urllib.request
+
+import typer
+
+from core import notify
+
+app = typer.Typer()
+
+# statuses we treat as "accepting audits right now" (per-source normalised)
+_OPEN = ("live", "active", "open", "in progress", "in_progress", "registration", "register")
+
+_STATE_FILE = str(pathlib.Path.home() / ".chainscope" / "watch_state.json")
+
+
+def _get(url: str, timeout: int = 30) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", "ignore")
+
+
+def _is_open(status: str) -> bool:
+    return any(k in status.lower() for k in _OPEN)
+
+
+def _fetch_immunefi() -> list[dict[str, typing.Any]]:
+    raw = _get("https://immunefi.com/audit-competition/")
+    out: list[dict[str, typing.Any]] = []
+    # Collect positions of every slug link and every "Live ... remaining" marker, then a slug is
+    # Live only if a live-marker immediately follows its link (i.e. its own card is live).
+    slug_pos = [(m.start(), m.group(1)) for m in re.finditer(r'audit-competition/([a-z0-9][a-z0-9\-]+)', raw)]
+    live_pos = [m.start() for m in re.finditer(r'Live</span>|<span[^>]*>Live<', raw)]
+    # a "Live ... remaining" marker belongs to the competition whose link immediately follows it
+    live_slugs: set[str] = set()
+    for lp in live_pos:
+        following = [pos for pos, _ in slug_pos if lp < pos <= lp + 3000]
+        if following:
+            live_slugs.add(dict(slug_pos)[min(following)])
+    for pos, slug in slug_pos:
+        status = "Live" if slug in live_slugs else "ended"
+        title = re.sub(r'[-_]', ' ', slug).strip().title()
+        m = re.search(r'audit-competition/%s[^"]*"[^>]*>\s*([^<>{]{3,70})' % re.escape(slug), raw)
+        if m:
+            title = m.group(1).strip() or title
+        out.append({"slug": slug, "name": title, "status": status, "source": "immunefi"})
+    # collapse duplicate slugs
+    return {c["slug"]: c for c in out}.values()
+
+
+def _fetch_code4rena() -> list[dict[str, typing.Any]]:
+    raw = _get("https://code4rena.com/audits")
+    out: list[dict[str, typing.Any]] = []
+    # C4 contest cards: grab name + nearby status + pool.
+    # Best-effort: any card whose rendered text contains a live/progress/remaining indicator.
+    for block in re.findall(r'<a[^>]*href="/audits/[^"]*"[^>]*>(.*?)</a>\s*</[^>]+>\s*<(div|h[1-6])[^>]*>(.*?)</\2>', raw, re.S):
+        pass
+    # simpler: find contest-name -> status hints
+    for m in re.finditer(r'(?s)<div[^>]*class="[^"]*"[^>]*>\s*([A-Za-z][A-Za-z0-9 .\-&;]{2,40})\s*(?:<[^>]+>)*\s*(Report in progress|Live|in progress|Completed|Active)', raw):
+        status = m.group(2).strip()
+        out.append({"slug": re.sub(r'[^a-z0-9]+', '-', m.group(1).lower()).strip('-'),
+                    "name": m.group(1).strip(), "status": status, "source": "code4rena"})
+    return out
+
+
+def _fetch_sherlock() -> list[dict[str, typing.Any]]:
+    raw = _get("https://audits.sherlock.xyz/contests")
+    out: list[dict[str, typing.Any]] = []
+    for m in re.finditer(r'([A-Za-z0-9][A-Za-z0-9 .\-&;]{3,40})\s*<[^>]*>\s*(Active|Open|Live|Upcoming|Judging)', raw):
+        status = m.group(2).strip()
+        out.append({"slug": re.sub(r'[^a-z0-9]+', '-', m.group(1).lower()).strip('-'),
+                    "name": m.group(1).strip(), "status": status, "source": "sherlock"})
+    return out
+
+
+def _fetch_cantina() -> list[dict[str, typing.Any]]:
+    raw = _get("https://cantina.xyz/competitions")
+    out: list[dict[str, typing.Any]] = []
+    for m in re.finditer(r'([A-Za-z0-9][A-Za-z0-9 .\-&;]{3,40})\s*<[^>]*>\s*(Live|Open|Active|Upcoming)', raw):
+        status = m.group(2).strip()
+        out.append({"slug": re.sub(r'[^a-z0-9]+', '-', m.group(1).lower()).strip('-'),
+                    "name": m.group(1).strip(), "status": status, "source": "cantina"})
+    return out
+
+
+def _load_seen() -> set[str]:
+    try:
+        with open(_STATE_FILE) as fh:
+            return set(json.load(fh).get("seen", []))
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def _save_seen(seen: set[str]) -> None:
+    p = pathlib.Path(_STATE_FILE)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "w") as fh:
+        json.dump({"seen": sorted(seen)}, fh, indent=2)
+
+
+def _detect() -> list[dict[str, typing.Any]]:
+    detected: list[dict[str, typing.Any]] = []
+    errors: list[str] = []
+    for name, fn in (("immunefi", _fetch_immunefi), ("code4rena", _fetch_code4rena),
+                     ("sherlock", _fetch_sherlock), ("cantina", _fetch_cantina)):
+        try:
+            detected.extend(fn())
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{name}: {exc}")
+    return detected, errors
+
+
+@app.command()
+def watch(
+    once: bool = typer.Option(False, "--once", help="Run a single check and exit"),
+    interval: int = typer.Option(1800, "--interval", help="Poll interval in seconds (default 30m)"),
+    json_output: bool = typer.Option(False, "--json", help="Print the detected set as JSON"),
+    state: str = typer.Option(_STATE_FILE, "--state", help="State file for seen contests"),
+):
+    seen = _load_seen()
+    while True:
+        opened, errors = _detect()
+        open_contests = [c for c in opened if c.get("slug") and _is_open(c.get("status") or "")]
+        fresh = [c for c in open_contests if c["slug"] not in seen]
+        names = "\n".join(
+            f"- {c['name']} [{c['source']}] ({c.get('status') or '?'})"
+            for c in fresh
+        )
+        if fresh:
+            for c in fresh:
+                seen.add(c["slug"])
+            _save_seen(seen)
+            subject = f"New audit competition open: {len(fresh)}"
+            body = (
+                f"New fresh-code audit competition(s) detected:\n{names}\n\n"
+                "Open the source repo and run cs_fetch/cs_target immediately - these windows "
+                "are short and findings flood in fast."
+            )
+            notify.notify(subject, body)
+        summary = (
+            f"[cs_watch] open now: {sum(1 for c in opened if _is_open(c.get('status') or ''))}"
+            f" | new since last: {len(fresh)}"
+        )
+        if json_output:
+            print(json.dumps({"open": opened, "new": fresh, "errors": errors}, indent=2))
+        else:
+            print(summary)
+            if fresh:
+                print(names)
+            if errors:
+                print("  (sources skipped: " + "; ".join(errors) + ")", file=sys.stderr)
+        if once:
+            break
+        time.sleep(interval)
+
+
+if __name__ == "__main__":
+    app()
