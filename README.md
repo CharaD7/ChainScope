@@ -664,3 +664,18 @@ configured in the environment; if neither is set it appends to ~/.chainscope/not
 and prints. State (already-reported slugs) persists in ~/.chainscope/watch_state.json so a
 contest is only announced once. Sources are best-effort (JS-heavy pages may be noisy); the
 Immunefi audit-competition source is the reliable one.
+
+## Notifications (cs_watch) — Bird email via SMTP
+
+`cs_watch` notifies through `core/notify`. To use your **Bird** email channel, set (environment,
+never commit the key):
+
+    export SMTP_HOST=eu1.smtp.bird.com
+    export SMTP_PORT=465            # 465 = implicit SSL/TLS; 587/2525 = STARTTLS
+    export SMTP_USER=bird
+    export SMTP_PASS=bk_eu1_...     # your Bird API/password key
+    export SMTP_TO=you@example.com
+
+Alternatively use a webhook (Discord/Slack/Telegram) via `NOTIFY_WEBHOOK_URL`, or leave both
+unset to fall back to ~/.chainscope/notifications.log. The port 465 path uses `smtplib.SMTP_SSL`;
+587/2525 use STARTTLS.
