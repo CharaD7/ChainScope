@@ -19,3 +19,6 @@ tests/.DS_Store
 # ChainScope local graph artifacts
 graph.db
 *.db
+
+# local secrets (contains Bird key - never commit)
+run_watch.sh
