@@ -643,3 +643,24 @@ still required.
 
 > Methodology credit: inspired by **KeiZo_Zo**'s AI-led, long-tail, thin-audit,
 > permissionless-money-path approach to bug bounty hunting.
+
+## cs_watch — live audit-competition watcher (out-of-the-box hunting)
+
+Fresh, thin-audit targets rarely appear as standing Immunefi bounties (those are audited
+majors). They usually show up as *time-boxed audit competitions* (Code4rena, Sherlock,
+Cantina, Immunefi audit-competitions) whose code is public and un-audited - exactly the
+Keizo profile. `cs_watch` polls those sources, remembers what it has already reported, and
+notifies the moment a NEW competition opens, so you can audit it inside its window before
+findings flood in.
+
+```
+python cs_watch.py --once              # check now, notify on new opens, exit
+python cs_watch.py --interval 1800     # poll every 30 minutes
+python cs_watch.py --json              # machine-readable output
+```
+
+Notifications route through `core/notify`: a webhook (Discord/Slack/Telegram) or SMTP email,
+configured in the environment; if neither is set it appends to ~/.chainscope/notifications.log
+and prints. State (already-reported slugs) persists in ~/.chainscope/watch_state.json so a
+contest is only announced once. Sources are best-effort (JS-heavy pages may be noisy); the
+Immunefi audit-competition source is the reliable one.
