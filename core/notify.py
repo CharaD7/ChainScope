@@ -25,7 +25,9 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import shutil
 import smtplib
+import subprocess
 import sys
 import typing
 import urllib.error
@@ -94,8 +96,35 @@ def _log_locally(subject: str, body: str) -> None:
     print(f"[notify] (local log {log}) {subject}\n{body}", file=sys.stdout)
 
 
+def _dunst(subject: str, body: str) -> bool:
+    """Fire a desktop popup (dunst/notify-send). Best-effort; returns True if a popup was shown."""
+    if not os.environ.get("NOTIFY_DUNST", "1").strip():
+        return False
+    sender = shutil.which("notify-send")
+    if sender:
+        try:
+            subprocess.run([sender, "cs_watch - " + subject, body[:300]], timeout=5, check=False)
+            return True
+        except Exception:  # noqa: BLE001
+            pass
+    # fall back to dunstctl (dunst's own CLI) if present
+    dctl = shutil.which("dunstctl")
+    if dctl:
+        try:
+            subprocess.run([dctl, "notify", body[:300]], timeout=5, check=False)
+            return True
+        except Exception:  # noqa: BLE001
+            pass
+    return False
+
+
 def notify(subject: str, body: str) -> bool:
-    """Send a notification via the first configured channel. Returns True if sent."""
+    """Send a notification via webhook/SMTP (best-effort) and ALWAYS fire a dunst popup + log.
+
+    Returns True if any remote channel (webhook or SMTP) delivered; a local dunst popup and a
+    log entry are always written so nothing is silently dropped.
+    """
+    _dunst(subject, body)  # always show a desktop popup (if a display is available)
     webhook = os.environ.get("NOTIFY_WEBHOOK_URL", "").strip()
     if webhook:
         try:

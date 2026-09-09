@@ -692,3 +692,16 @@ Notes: simple direct contracts classify well (PUSH4 dispatcher). Custom/non-EIP1
 some optimized dispatchers don't PUSH4-pack selectors use `cast implementation <addr>` +
 `cast selectors` / `cast 4byte <selector>` / `cast disassemble` for those — see the LBTC worked
 example in the campaign. Use `cs_re` first, fall back to `cast` for stubborn proxies.
+
+## Desktop popups (dunst) — no email/webhook needed
+
+`core/notify` also fires a **dunst/notify-send popup** on every notification (set `NOTIFY_DUNST=1` to
+enable, default on). Enable it in `run_watch.sh`:
+
+    export DISPLAY="${DISPLAY:-:1}"
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/1000/bus"   # or it auto-reads the dunst process env
+    export NOTIFY_DUNST=1
+
+Then `cs_watch` shows a visible desktop popup the moment a fresh competition opens — works without a
+verified Bird sender or any webhook URL. `run_watch.sh` already wires the session env best-effort and is
+kept out of git (it contains your Bird `bk_` key).
