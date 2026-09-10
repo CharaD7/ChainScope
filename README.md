@@ -653,6 +653,16 @@ Keizo profile. `cs_watch` polls those sources, remembers what it has already rep
 notifies the moment a NEW competition opens, so you can audit it inside its window before
 findings flood in.
 
+Sources polled:
+- **Time-boxed competitions:** Immunefi audit-competitions, Code4rena, Sherlock, Cantina.
+- **Standing bounties (catalog, baselined once):** Immunefi bounties, Sherlock bug-bounties,
+  and the full HackenProof catalog (via its public API) - the last filtered to
+  `min_reputation_points <= HACKENPROOF_MAX_REP` (default 80, which profile completion alone
+  reaches) and tagged `[DualDefense]` for crowdsourced audits. HackenProof's public page only
+  lists a subset; the API exposes the whole catalog, including the low-report audit programs.
+Catalog sources list many ongoing programs at once, so on first sight they are seeded
+silently (`__catalog_baseline__`) and only programs appearing afterwards are surfaced.
+
 ```
 python cs_watch.py --once              # check now, notify on new opens, exit
 python cs_watch.py --interval 1800     # poll every 30 minutes
