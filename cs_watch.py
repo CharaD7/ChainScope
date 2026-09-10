@@ -41,8 +41,10 @@ _OPEN = ("live", "active", "open", "in progress", "in_progress", "registration",
 
 _STATE_FILE = str(pathlib.Path.home() / ".chainscope" / "watch_state.json")
 
-# marker stored in the seen-set so the (large, rotating) hackenproof catalog is baselined once
-_HP_BASELINE = "__hackenproof_catalog_baseline__"
+# "catalog" sources list many ongoing programs at once (bounties, not time-boxed contests);
+# baseline them silently on first sight so only programs appearing afterwards are surfaced.
+_CATALOG_SOURCES = ("hackenproof", "immunefi-bounty", "sherlock-bounty")
+_CATALOG_BASELINE = "__catalog_baseline__"
 
 
 def _get(url: str, timeout: int = 30) -> str:
@@ -168,6 +170,31 @@ def _fetch_hackenproof() -> list[dict[str, typing.Any]]:
     return {c["slug"]: c for c in out}.values()
 
 
+def _fetch_immunefi_bounties() -> list[dict[str, typing.Any]]:
+    """Ongoing Immunefi bug bounties (not audit competitions). Immunefi has no reputation
+    gate, so a newly-listed bounty is immediately submittable. The index lists every bounty,
+    so this source is baselined like the others."""
+    raw = _get("https://immunefi.com/bug-bounty/")
+    out: list[dict[str, typing.Any]] = []
+    # The full bounty list lives in the Next.js flight payload (not just the visible anchors).
+    for m in re.finditer(r'/bug-bounty/([a-z0-9][a-z0-9\-]+)/information/', raw):
+        slug = m.group(1)
+        out.append({"slug": f"immunefi-bounty-{slug}", "name": slug.replace("-", " ").title(),
+                    "status": "live", "source": "immunefi-bounty"})
+    return {c["slug"]: c for c in out}.values()
+
+
+def _fetch_sherlock_bounties() -> list[dict[str, typing.Any]]:
+    """Ongoing Sherlock bug bounties (not contests)."""
+    raw = _get("https://audits.sherlock.xyz/bug-bounties")
+    out: list[dict[str, typing.Any]] = []
+    for m in re.finditer(r'/bug-bounties/(\d+)', raw):
+        bid = m.group(1)
+        out.append({"slug": f"sherlock-bounty-{bid}", "name": f"Sherlock Bug Bounty #{bid}",
+                    "status": "live", "source": "sherlock-bounty"})
+    return {c["slug"]: c for c in out}.values()
+
+
 def _load_seen() -> set[str]:
     try:
         with open(_STATE_FILE) as fh:
@@ -188,7 +215,9 @@ def _detect() -> list[dict[str, typing.Any]]:
     errors: list[str] = []
     for name, fn in (("immunefi", _fetch_immunefi), ("code4rena", _fetch_code4rena),
                      ("sherlock", _fetch_sherlock), ("cantina", _fetch_cantina),
-                     ("hackenproof", _fetch_hackenproof)):
+                     ("hackenproof", _fetch_hackenproof),
+                     ("immunefi-bounty", _fetch_immunefi_bounties),
+                     ("sherlock-bounty", _fetch_sherlock_bounties)):
         try:
             detected.extend(fn())
         except Exception as exc:  # noqa: BLE001
@@ -209,11 +238,11 @@ def watch(
         # Baseline: the first time we observe the hackenproof source, record its whole current
         # program set silently (so existing programs don't flood the "new launch" inbox). Only
         # slugs that appear AFTER this baseline are surfaced as fresh.
-        hp_items = [c for c in opened if c.get("source") == "hackenproof" and c.get("slug")]
-        if hp_items and _HP_BASELINE not in seen:
-            for c in hp_items:
+        catalog_items = [c for c in opened if c.get("source") in _CATALOG_SOURCES and c.get("slug")]
+        if catalog_items and _CATALOG_BASELINE not in seen:
+            for c in catalog_items:
                 seen.add(c["slug"])
-            seen.add(_HP_BASELINE)
+            seen.add(_CATALOG_BASELINE)
             _save_seen(seen)
         open_contests = [c for c in opened if c.get("slug") and _is_open(c.get("status") or "")]
         fresh = [c for c in open_contests if c["slug"] not in seen]
