@@ -41,6 +41,9 @@ _OPEN = ("live", "active", "open", "in progress", "in_progress", "registration",
 
 _STATE_FILE = str(pathlib.Path.home() / ".chainscope" / "watch_state.json")
 
+# marker stored in the seen-set so the (large, rotating) hackenproof catalog is baselined once
+_HP_BASELINE = "__hackenproof_catalog_baseline__"
+
 
 def _get(url: str, timeout: int = 30) -> str:
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -129,13 +132,39 @@ def _fetch_cantina() -> list[dict[str, typing.Any]]:
 
 
 def _fetch_hackenproof() -> list[dict[str, typing.Any]]:
-    raw = _get("https://hackenproof.com/programs")
+    """Fetch the full HackenProof catalog via the public API (the /programs HTML only lists a
+    subset and hides the DualDefense/audit programs). Only surface programs the account can
+    actually submit to: Active and with min_reputation_points <= HACKENPROOF_MAX_REP (default
+    80, which profile completion alone reaches)."""
+    max_rep = int(os.environ.get("HACKENPROOF_MAX_REP", "80") or 80)
+    raw = _get("https://dashboard.hackenproof.com/api/v1/programs?per_page=200")
+    try:
+        data = json.loads(raw)
+    except Exception:  # noqa: BLE001
+        return []
+    progs = data.get("programs", data if isinstance(data, list) else [])
     out: list[dict[str, typing.Any]] = []
-    for m in re.finditer(r'<a[^>]*href="/programs/([a-z0-9][a-z0-9\-]*)"[^>]*>(.*?)</a>', raw, re.S):
-        slug = m.group(1)
-        name = html.unescape(re.sub(r'<[^>]+>', '', m.group(2))).strip() or slug
-        out.append({"slug": slug, "name": name, "status": "open", "source": "hackenproof"})
-    # HackenProof programs are ongoing bounties; a "fresh launch" = a new slug appearing.
+    for p in progs:
+        slug = p.get("slug")
+        if not slug:
+            continue
+        status = p.get("status")
+        if isinstance(status, dict):
+            status = status.get("name")
+        if (status or "").lower() != "active":
+            continue
+        rep = p.get("min_reputation_points")
+        rep = 0 if rep is None else rep
+        if rep > max_rep:
+            continue
+        out.append({
+            "slug": slug,
+            "name": p.get("title") or slug,
+            "status": "open",
+            "source": "hackenproof",
+            "rep": rep,
+            "dd": bool(p.get("dual_defence")),
+        })
     return {c["slug"]: c for c in out}.values()
 
 
@@ -181,16 +210,21 @@ def watch(
         # program set silently (so existing programs don't flood the "new launch" inbox). Only
         # slugs that appear AFTER this baseline are surfaced as fresh.
         hp_items = [c for c in opened if c.get("source") == "hackenproof" and c.get("slug")]
-        if hp_items and not any(c["slug"] in seen for c in hp_items):
+        if hp_items and _HP_BASELINE not in seen:
             for c in hp_items:
                 seen.add(c["slug"])
+            seen.add(_HP_BASELINE)
             _save_seen(seen)
         open_contests = [c for c in opened if c.get("slug") and _is_open(c.get("status") or "")]
         fresh = [c for c in open_contests if c["slug"] not in seen]
-        names = "\n".join(
-            f"- {c['name']} [{c['source']}] ({c.get('status') or '?'})"
-            for c in fresh
-        )
+
+        def _label(c: dict[str, typing.Any]) -> str:
+            extra = ""
+            if c.get("source") == "hackenproof":
+                extra = f" rep<={c.get('rep')}" + (" [DualDefense]" if c.get("dd") else "")
+            return f"- {c['name']} [{c['source']}] ({c.get('status') or '?'}){extra}"
+
+        names = "\n".join(_label(c) for c in fresh)
         if fresh:
             for c in fresh:
                 seen.add(c["slug"])
