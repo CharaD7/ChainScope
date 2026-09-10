@@ -139,12 +139,21 @@ def _fetch_hackenproof() -> list[dict[str, typing.Any]]:
     actually submit to: Active and with min_reputation_points <= HACKENPROOF_MAX_REP (default
     80, which profile completion alone reaches)."""
     max_rep = int(os.environ.get("HACKENPROOF_MAX_REP", "80") or 80)
-    raw = _get("https://dashboard.hackenproof.com/api/v1/programs?per_page=200")
     try:
+        raw = _get("https://dashboard.hackenproof.com/api/v1/programs?per_page=200")
         data = json.loads(raw)
+        progs = data.get("programs", data if isinstance(data, list) else [])
     except Exception:  # noqa: BLE001
-        return []
-    progs = data.get("programs", data if isinstance(data, list) else [])
+        # dashboard API unreachable (e.g. DNS-blocked on some networks); fall back to the
+        # public page, which lists only the featured bounties (no rep/DualDefense metadata).
+        raw = _get("https://hackenproof.com/programs")
+        out = []
+        for m in re.finditer(r'<a[^>]*href="/programs/([a-z0-9][a-z0-9\-]*)"[^>]*>(.*?)</a>', raw, re.S):
+            slug = m.group(1)
+            name = html.unescape(re.sub(r'<[^>]+>', '', m.group(2))).strip() or slug
+            out.append({"slug": slug, "name": name, "status": "open", "source": "hackenproof",
+                        "rep": None, "dd": False})
+        return {c["slug"]: c for c in out}.values()
     out: list[dict[str, typing.Any]] = []
     for p in progs:
         slug = p.get("slug")
@@ -250,7 +259,8 @@ def watch(
         def _label(c: dict[str, typing.Any]) -> str:
             extra = ""
             if c.get("source") == "hackenproof":
-                extra = f" rep<={c.get('rep')}" + (" [DualDefense]" if c.get("dd") else "")
+                rep = c.get("rep")
+                extra = (f" rep<={rep}" if rep is not None else "") + (" [DualDefense]" if c.get("dd") else "")
             return f"- {c['name']} [{c['source']}] ({c.get('status') or '?'}){extra}"
 
         names = "\n".join(_label(c) for c in fresh)
