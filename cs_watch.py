@@ -20,6 +20,7 @@ State is persisted in ~/.chainscope/watch_state.json so a new contest is only re
 from __future__ import annotations
 
 import contextlib
+import datetime
 import html
 import json
 import os
@@ -227,6 +228,36 @@ def _fetch_hackenproof() -> list[dict[str, typing.Any]]:
     return {c["slug"]: c for c in out}.values()
 
 
+def _fetch_codehawks() -> list[dict[str, typing.Any]]:
+    """Cyfrin CodeHawks audit competitions (fresh, time-boxed Solidity contests). SvelteKit +
+    tRPC; the competitions list comes from the public tRPC endpoint."""
+    raw = _get("https://codehawks.cyfrin.io/trpc/competitions.getCompetitions?batch=1&input=%7B%7D")
+    data = json.loads(raw)
+    if isinstance(data, list) and data and isinstance(data[0], dict) and "result" in data[0]:
+        data = data[0]["result"].get("data")
+    now = datetime.datetime.now(datetime.timezone.utc)
+    out: list[dict[str, typing.Any]] = []
+    for c in data or []:
+        slug = c.get("urlSlug") or c.get("id")
+        if not slug:
+            continue
+        status = "open"
+        try:
+            end = c.get("endDate")
+            start = c.get("startDate")
+            e = datetime.datetime.fromisoformat(str(end).replace("Z", "+00:00")) if end else None
+            s = datetime.datetime.fromisoformat(str(start).replace("Z", "+00:00")) if start else None
+            if e and now > e:
+                status = "ended"
+            elif s and now < s:
+                status = "upcoming"
+        except Exception:  # noqa: BLE001
+            pass
+        out.append({"slug": f"codehawks-{slug}", "name": c.get("name") or slug,
+                    "status": status, "source": "codehawks"})
+    return out
+
+
 def _fetch_immunefi_bounties() -> list[dict[str, typing.Any]]:
     """Ongoing Immunefi bug bounties (not audit competitions). Immunefi has no reputation
     gate, so a newly-listed bounty is immediately submittable. The index lists every bounty,
@@ -274,7 +305,8 @@ def _detect() -> list[dict[str, typing.Any]]:
                      ("sherlock", _fetch_sherlock), ("cantina", _fetch_cantina),
                      ("hackenproof", _fetch_hackenproof),
                      ("immunefi-bounty", _fetch_immunefi_bounties),
-                     ("sherlock-bounty", _fetch_sherlock_bounties)):
+                     ("sherlock-bounty", _fetch_sherlock_bounties),
+                     ("codehawks", _fetch_codehawks)):
         try:
             detected.extend(fn())
         except Exception as exc:  # noqa: BLE001
