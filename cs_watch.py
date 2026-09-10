@@ -19,11 +19,13 @@ State is persisted in ~/.chainscope/watch_state.json so a new contest is only re
 """
 from __future__ import annotations
 
+import contextlib
 import html
 import json
 import os
 import pathlib
 import re
+import socket
 import sys
 import time
 import typing
@@ -55,6 +57,49 @@ def _get(url: str, timeout: int = 30) -> str:
 
 def _is_open(status: str) -> bool:
     return any(k in status.lower() for k in _OPEN)
+
+
+def _doh_resolve(host: str) -> list[str]:
+    """Resolve `host` to IPv4 addresses via Cloudflare DoH, bypassing a local resolver that
+    may sinkhole/block it (some networks return a documentation address for such hosts)."""
+    try:
+        req = urllib.request.Request(
+            f"https://1.1.1.1/dns-query?name={host}&type=A",
+            headers={"accept": "application/dns-json", "User-Agent": "Mozilla/5.0"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8", "ignore"))
+        return [a["data"] for a in data.get("Answer", []) if a.get("type") == 1]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+@contextlib.contextmanager
+def _pin_host(host: str, ip: str):
+    """Temporarily resolve `host` to `ip` at the socket layer (TLS SNI / Host header stay the
+    real hostname, so the connection is valid; only the resolved address is overridden)."""
+    original = socket.getaddrinfo
+
+    def patched(h, *args, **kwargs):
+        return original(ip if h == host else h, *args, **kwargs)
+
+    socket.getaddrinfo = patched  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        socket.getaddrinfo = original  # type: ignore[assignment]
+
+
+def _get_hackenproof_api(url: str, host: str, timeout: int = 30) -> str:
+    try:
+        return _get(url, timeout)
+    except Exception:
+        # Local DNS likely blocks `host`; retry with a DoH-resolved, socket-pinned address.
+        ips = _doh_resolve(host)
+        if not ips:
+            raise
+        with _pin_host(host, ips[0]):
+            return _get(url, timeout)
 
 
 def _fetch_immunefi() -> list[dict[str, typing.Any]]:
@@ -140,7 +185,10 @@ def _fetch_hackenproof() -> list[dict[str, typing.Any]]:
     80, which profile completion alone reaches)."""
     max_rep = int(os.environ.get("HACKENPROOF_MAX_REP", "80") or 80)
     try:
-        raw = _get("https://dashboard.hackenproof.com/api/v1/programs?per_page=200")
+        raw = _get_hackenproof_api(
+            "https://dashboard.hackenproof.com/api/v1/programs?per_page=200",
+            "dashboard.hackenproof.com",
+        )
         data = json.loads(raw)
         progs = data.get("programs", data if isinstance(data, list) else [])
     except Exception:  # noqa: BLE001
