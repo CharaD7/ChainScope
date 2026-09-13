@@ -732,3 +732,24 @@ access-tested (Nethermind `test_access_setTreasuryBorrower`) and documented-inte
 NOT rewardable. Requires `pdftotext` (poppler-utils). Note: github.com `.../blob/*.pdf` links are
 HTML pages, not raw PDFs - they are listed but not searchable; raw storage.googleapis/`/assets/files`
 links download fine.
+
+## Web / application pentest track (cs_web + cs_pays)
+
+ChainScope started EVM-only, but many programs (Immunefi "Websites and Applications", HackenProof
+"Web & API", Cantina, HackerOne/Bugcrowd) also scope **web apps and APIs**. This track brings the
+**Wesley Thijs ("The XSS Rat")** method alongside the existing **KeiZo_Zo (Keixo)** long-tail /
+thin-audit method, so we are not blind to half a program. See `WEB_PENTEST_TRACK.md` and
+`WESLEY_THIJS_ADAPTED.md`.
+
+    python cs_web.py fingerprint <url>   # fingerprint before you fire (server, tech, security headers, CSP)
+    python cs_web.py plan                # the systematic test plan (walk -> every field -> every class)
+    python cs_web.py payloads            # the per-field payload set (XSS/SSTI/SQLi/SSRF/...)
+
+`cs_pays.py` is the "study what pays" tool (the BountySkiller idea, adapted): it aggregates the
+recent exploit feed (rekt.news) into the classes currently landing, so hunts bias toward them.
+
+    python cs_pays.py                    # recent incidents + class/chain/project frequency
+
+Both methods are in the loop: **Keixo** = where to point (thin-audit long-tail, delta, subtract the
+already-found: `cs_target`/`cs_scan`/`cs_watch`/`cs_audits`); **Wesley Thijs** = how to hunt
+(fingerprint, walk, every field, every class, study what pays: `cs_web`/`cs_pays`).
