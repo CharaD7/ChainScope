@@ -14,7 +14,9 @@ from __future__ import annotations
 import argparse
 import inspect
 import sys
+import typing
 from dataclasses import dataclass, field
+from typing import get_origin
 
 
 class Exit(SystemExit):
@@ -60,9 +62,13 @@ class Typer:
 
         parser = argparse.ArgumentParser()
         sig = inspect.signature(self._command)
+        try:
+            hints = typing.get_type_hints(self._command)
+        except Exception:  # noqa: BLE001 - unresolvable annotation
+            hints = {}
         for name, param in sig.parameters.items():
             info = param.default
-            annotation = param.annotation
+            annotation = hints.get(name, param.annotation)
             if not isinstance(info, _ParamInfo):
                 info = _ParamInfo(kind="option", default=param.default)
 
@@ -80,16 +86,20 @@ class Typer:
                 kwargs["action"] = "store_true" if info.default is False else "store_false"
                 kwargs["default"] = info.default
             else:
-                if info.default is ...:
-                    kwargs["required"] = True
-                else:
-                    kwargs["default"] = info.default
                 if annotation is int:
                     kwargs["type"] = int
                 elif annotation is float:
                     kwargs["type"] = float
+                elif get_origin(annotation) is list:
+                    kwargs["type"] = str
+                    kwargs["action"] = "append"
+                    kwargs["default"] = info.default or []
                 else:
                     kwargs["type"] = str
+                if info.default is ...:
+                    kwargs["required"] = True
+                else:
+                    kwargs["default"] = info.default
             parser.add_argument(*option_names, **kwargs)
 
         parsed = parser.parse_args()
