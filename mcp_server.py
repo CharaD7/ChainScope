@@ -6160,5 +6160,178 @@ def cs_lookup(
         conn.close()
 
 
+# ============================================================================
+# Shinobi offensive-security surface (Phases 1-6)
+# ============================================================================
+
+def _shinobi_payload(data):
+    import json as _json
+    return _json.dumps(data, default=str)
+
+
+@mcp.tool()
+def shinobi_scopes() -> str:
+    """List the programs tracked by Shinobi (scope + guardrail DB).
+
+    Returns slug, platform, name, max bounty, live flag and in-scope asset count
+    for every program in the Shinobi store.
+    """
+    from shinobi.store import Store
+    try:
+        rows = Store().list_programs()
+    except Exception as exc:  # noqa: BLE001
+        return _shinobi_payload({"error": str(exc)})
+    return _shinobi_payload([
+        {"slug": r.get("slug"), "platform": r.get("platform"),
+         "name": r.get("name"), "max_bounty": r.get("max_bounty"),
+         "live": r.get("paused") is not True,
+         "assets": len(r.get("in_scope") or [])}
+        for r in rows
+    ])
+
+
+@mcp.tool()
+def shinobi_find(slug: str, status: str = "triage") -> str:
+    """Return Shinobi findings for a program (default: triage candidates).
+
+    Args:
+        slug: program slug in the Shinobi store
+        status: finding status filter - triage | confirmed | all
+    """
+    from shinobi.store import Store
+    rows = Store().list_findings(slug)
+    if status != "all":
+        rows = [r for r in rows if r.get("status") == status]
+    return _shinobi_payload([
+        {"id": r.get("id"), "vuln_class": r.get("vuln_class"),
+         "severity": r.get("severity"), "title": r.get("title"),
+         "evidence": r.get("evidence_json")}
+        for r in rows
+    ])
+
+
+@mcp.tool()
+def shinobi_crawl(slug: str, depth: int = 2, max_pages: int = 60) -> str:
+    """Run the Shinobi Playwright crawler over a program's in-scope hosts.
+
+    Args:
+        slug: program slug (must already be fetched into the store)
+        depth: crawl depth (0=start page only)
+        max_pages: safety cap on pages visited
+
+    Returns pages crawled, JS bundles, requests, and the tech fingerprint; also
+    persists mapped surfaces into the Shinobi DB.
+    """
+    from shinobi import scope as scope_mod
+    from shinobi.probe import Crawler
+    from shinobi.store import Store
+    store = Store()
+    rec = store.get_program(slug)
+    if not rec:
+        return _shinobi_payload({"error": f"unknown program {slug}"})
+    scope_obj = scope_mod.scope_from_program_record(rec)
+    crawler = Crawler(scope_obj, store, depth=depth, headless=True, max_pages=max_pages)
+    try:
+        result = crawler.run()
+    except Exception as exc:  # noqa: BLE001
+        return _shinobi_payload({"error": str(exc)})
+    return _shinobi_payload({
+        "pages": len(result.pages), "bundles": len(result.bundles),
+        "requests": len(result.requests), "tech": result.tech,
+        "surfaces": len(store.list_surfaces(slug)),
+    })
+
+
+@mcp.tool()
+def shinobi_probe(slug: str, roles: str = "anonymous", max_tests: int = 400) -> str:
+    """Run the Shinobi testing engine over the program's mapped surfaces.
+
+    Args:
+        slug: program slug
+        roles: comma-separated roles to test with (anonymous, user, admin, ...)
+        max_tests: request budget for this pass
+
+    Returns signalling outcomes + count of candidates stored as triage findings.
+    """
+    from shinobi import engine as eng
+    from shinobi import scope as scope_mod
+    from shinobi.store import Store
+    store = Store()
+    rec = store.get_program(slug)
+    if not rec:
+        return _shinobi_payload({"error": f"unknown program {slug}"})
+    scope_obj = scope_mod.scope_from_program_record(rec)
+    roles = [r.strip() for r in roles.split(",") if r.strip()] or ["anonymous"]
+    match_roles = list(dict.fromkeys(roles))
+    engine = eng.Engine(scope_obj, store, roles=match_roles)
+    try:
+        outcomes = engine.run(max_tests=max_tests)
+    except Exception as exc:  # noqa: BLE001
+        return _shinobi_payload({"error": str(exc)})
+    signal = [o for o in outcomes if o.verdict.label != "benign"]
+    return _shinobi_payload({
+        "tested": len(outcomes),
+        "signalling": len(signal),
+        "roles": match_roles,
+        "highlights": [
+            {"class": o.payload_class, "verdict": o.verdict.label,
+             "method": o.method, "endpoint": o.endpoint,
+             "param": o.param, "reason": o.verdict.reason}
+            for o in signal[:20]
+        ],
+    })
+
+
+@mcp.tool()
+def shinobi_verify(slug: str, finding_id: str = "") -> str:
+    """Kill-test a Shinobi triage candidate (or list all with kill-test state).
+
+    Args:
+        slug: program slug
+        finding_id: finding id prefix; empty -> run the checklist on every candidate
+
+    Returns per-finding checklist verdicts + submittable/needs_work/not_submittable.
+    """
+    from shinobi import verify as verify_mod
+    from shinobi.store import Store
+    store = Store()
+    rec = store.get_program(slug)
+    if not rec:
+        return _shinobi_payload({"error": f"unknown program {slug}"})
+    rows = [r for r in store.list_findings(slug) if r.get("status") == "triage"]
+    match = [r for r in rows if not finding_id or r["id"].startswith(finding_id)]
+    if not match:
+        return _shinobi_payload({"error": f"no triage candidates for {slug} ({finding_id})"})
+    out = []
+    for r in match:
+        kt = verify_mod.kill_test(rec, r)
+        out.append({"id": r["id"], "title": r["title"], "verdict": kt.verdict,
+                    "checks": {c[0]: (c[1], c[2]) for c in kt.checks}})
+    return _shinobi_payload(out)
+
+
+@mcp.tool()
+def shinobi_report(slug: str, finding_id: str) -> str:
+    """Render a submission-ready markdown report for a confirmed finding.
+
+    Args:
+        slug: program slug
+        finding_id: finding id prefix of a CONFIRMED finding
+
+    Returns the full markdown body (Immunefi-style).
+    """
+    from shinobi import report as report_mod
+    from shinobi.store import Store
+    store = Store()
+    rec = store.get_program(slug)
+    if not rec:
+        return _shinobi_payload({"error": f"unknown program {slug}"})
+    row = next((r for r in store.list_findings(slug)
+                if r.get("id", "").startswith(finding_id)), None)
+    if not row:
+        return _shinobi_payload({"error": f"no finding {finding_id} for {slug}"})
+    return report_mod.render_report(rec, [row])
+
+
 if __name__ == "__main__":
     mcp.run()
