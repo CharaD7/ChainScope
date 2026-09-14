@@ -46,7 +46,7 @@ def render_report(program: dict, findings: list[dict]) -> str:
     f = findings[0]
     ok = 0 < len(findings) < 8
     title = f.get("title") or "Untitled finding"
-    evidence: dict = _as_dict(f.get("evidence_json") or {})
+    evidence: dict = _as_dict(f.get("evidence") or {})
     severity = (f.get("severity") or "candidate").lower()
     cls = (f.get("vuln_class") or "").strip() or "web"
     cwe = CWE_BY_CLASS.get(cls, "CWE-N/A")

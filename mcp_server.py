@@ -6205,7 +6205,7 @@ def shinobi_find(slug: str, status: str = "triage") -> str:
     return _shinobi_payload([
         {"id": r.get("id"), "vuln_class": r.get("vuln_class"),
          "severity": r.get("severity"), "title": r.get("title"),
-         "evidence": r.get("evidence_json")}
+         "evidence": r.get("evidence")}
         for r in rows
     ])
 

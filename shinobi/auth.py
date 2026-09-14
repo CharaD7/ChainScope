@@ -102,7 +102,7 @@ class IMAPOTPReader:
 
     def __init__(self, imap_url: str, timeout: int = 30) -> None:
         parsed = urllib.parse.urlparse(imap_url)
-        use_ssl = parsed.scheme == "imaps" or (parsed.port or 993) == 493
+        use_ssl = parsed.scheme == "imaps" or (parsed.port or 993) == 993
         host = parsed.hostname or "localhost"
         port = parsed.port or (993 if use_ssl else 143)
         self.user = urllib.parse.unquote(parsed.username or "")
@@ -223,7 +223,7 @@ class FormLoginAttempter:
             return False
         return False
 
-def _submit_mfa(self, code: str, mfa_url: str) -> bool:
+    def _submit_mfa(self, code: str, mfa_url: str) -> bool:
         # try common MFA code field names
         for field in ["code", "otp", "token", "totp", "mfa_code", "mfaToken"]:
             try:

@@ -199,7 +199,6 @@ class Crawler:
             "generator": headers.get("x-generator"),
             "csp": (headers.get("content-security-policy") or "")[:200],
             "frameworks": frameworks,
-            "cookies": [c.get("e") for c in []],
         }
 
     # ---------------------------------------------------------------- persist

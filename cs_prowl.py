@@ -66,7 +66,7 @@ class _Commands:
         rows = [r for r in _db.list_findings(slug) if r.get("status") == "triage"]
         candidates: list[eng.TestOutcome] = []
         for r in rows:
-            ev = r.get("evidence_json") or {}
+            ev = r.get("evidence") or {}
             if isinstance(ev, str):
                 try:
                     ev = json.loads(ev)

@@ -13,6 +13,7 @@ trail.
 from __future__ import annotations
 
 import typing
+import urllib.parse
 
 import httpx
 
@@ -49,7 +50,7 @@ class GuardedSession:
         self.timeout = timeout
         self.client = httpx.Client(
             headers=self._headers, timeout=timeout,
-            follow_redirects=True, cookies=self._cookies,
+            follow_redirects=False, cookies=self._cookies,
         )
 
     # ------------------------------------------------------------------ guard
@@ -66,8 +67,27 @@ class GuardedSession:
     # ---------------------------------------------------------------- requests
     def request(self, method: str, url: str, **kwargs: typing.Any) -> Response:
         self._check(url)
-        # cookies are managed at the client level; sync jar back after each call
-        resp = self.client.request(method, url, **kwargs)
+        current = url
+        resp = self.client.request(method, current, **kwargs)
+        # follow redirects one hop at a time, refusing out-of-scope locations
+        hops = 0
+        while resp.is_redirect and hops < 5:
+            loc = resp.headers.get("location", "")
+            if not loc:
+                break
+            next_url = urllib.parse.urljoin(current, loc)
+            if not self.scope.authorized(next_url):
+                self.store.log_activity(
+                    self.scope.slug, self.log_actor, "scope-block",
+                    next_url, {"role": self.role, "reason": "redirect"})
+                if self.strict:
+                    break
+            current = next_url
+            try:
+                resp = self.client.request(method, current, **kwargs)
+            except Exception:  # noqa: BLE001
+                break
+            hops += 1
         self._sync_cookies()
         self.store.log_activity(
             self.scope.slug, self.log_actor, "request",
