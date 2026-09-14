@@ -85,7 +85,8 @@ class _Commands:
             raise typer.Exit(1)
         from shinobi.net import GuardedSession
         session = GuardedSession(scope_obj, _db)
-        schema = probe_mod.graphql_introspect(session.post, url)
+        schema = probe_mod.graphql_introspect(
+            lambda u, **kw: session.post(u, **kw), url)
         if not schema:
             typer.echo(f"no GraphQL schema at {url}")
             return

@@ -126,14 +126,15 @@ class ProgramScope:
         if not host:
             return False
         # out-of-scope prefixes always win
-        for oh, op in self.prefixes:
-            if oh == host and (path == op or path.startswith(op + "/")):
-                continue
         for oos in self.oos_prefixes:
             ohost = hostname(oos).lower()
             opath = urllib.parse.urlsplit(oos).path.rstrip("/")
             if ohost == host and (not opath or path == opath or path.startswith(opath + "/")):
                 return False
+        # path-prefix assets are allow rules pinned to their exact host
+        for oh, op in self.prefixes:
+            if oh == host and (path == op or path.startswith(op + "/")):
+                return True
         # host rules (with subdomain coverage for registrable domains)
         if host in self.hosts:
             return True

@@ -54,7 +54,7 @@ def kill_test(program: dict, candidate: dict, poc_ready: bool = False) -> KillTe
     """Run the checklist for one triage candidate row from the store."""
     severity = (candidate.get("severity") or "candidate").lower()
     title = candidate.get("title") or "?"
-    evidence: dict = _as_dict(candidate.get("evidence_json") or {})
+    evidence: dict = _as_dict(candidate.get("evidence") or {})
     has_writable_claim = any(w in title.lower() for w in
                              ("write", "takover", "privilege", "admin", "withdraw",
                               "transfer", "stored", "delete", "create"))
@@ -114,7 +114,7 @@ def kill_test(program: dict, candidate: dict, poc_ready: bool = False) -> KillTe
 
 def build_poc(candidate: dict) -> str:
     """Render a rerunnable PoC shell (curl-based for API candidates)."""
-    evidence: dict = _as_dict(candidate.get("evidence_json") or {})
+    evidence: dict = _as_dict(candidate.get("evidence") or {})
     method = evidence.get("method", "GET").upper()
     url = evidence.get("endpoint") or _url_from_title(candidate.get("title", ""))
     param = evidence.get("param", "")
