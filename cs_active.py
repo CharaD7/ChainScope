@@ -14,6 +14,7 @@ Shinobi DB (used later by the testing engine).
 from __future__ import annotations
 
 import json
+import urllib.parse
 import urllib.request
 
 import typer
@@ -37,10 +38,12 @@ class _Commands:
         return scope_mod.scope_from_program_record(rec)
 
     @staticmethod
-    def crawl(slug: str, start: list[str], depth: int, headed: bool) -> None:
+    def crawl(slug: str, start: list[str], depth: int, headed: bool,
+              limit: int, deadline: int) -> None:
         scope_obj = _Commands._scope(slug)
         crawler = probe_mod.Crawler(scope_obj, _db, depth=depth,
-                                    headless=not headed)
+                                    headless=not headed, max_pages=limit,
+                                    deadline=deadline)
         try:
             result = crawler.run(start_urls=start or None)
         except Exception as exc:  # noqa: BLE001
@@ -96,6 +99,27 @@ class _Commands:
                                "types": names}, indent=2))
 
     @staticmethod
+    def prune(slug: str) -> None:
+        """Drop surfaces that are obviously not real endpoints: JS template
+        literals or paths that embed a foreign hostname after the program host."""
+        from shinobi.probe import HOSTNAME_HEAD_RE, host_seg_looks_host
+        rows = _db.list_surfaces(slug)
+        bad: list[str] = []
+        for r in rows:
+            url = r["url"]
+            host = scope_mod.hostname(url)
+            path = urllib.parse.urlsplit(url).path.lstrip("/")
+            first = path.split("/")[0] if path else ""
+            if "${" in url or "{" in url:
+                bad.append(r["id"])
+            elif first and host_seg_looks_host(first):
+                bad.append(r["id"])
+            elif path and "." in first and first not in ("v1", "v2", "v3", "v1.0"):
+                bad.append(r["id"])
+        removed = _db.delete_surfaces(slug, bad)
+        typer.echo(f"pruned {removed} of {len(rows)} surfaces for {slug}")
+
+    @staticmethod
     def tech(url: str) -> None:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         try:
@@ -125,18 +149,21 @@ def active(
     depth: int = typer.Option(2, "--depth", help="crawl depth"),
     headed: bool = typer.Option(False, "--headed", help="show the browser"),
     kind: str = typer.Option("", "--kind", help="surface kind filter: web|api|network"),
-    limit: int = typer.Option(100, "--limit", help="max surfaces to print"),
+    limit: int = typer.Option(100, "--limit", help="max surfaces printed / pages crawled"),
+    deadline: int = typer.Option(150, "--deadline", help="crawl time budget (seconds)"),
 ):
     """Shinobi active exploration: crawl + map + fingerprint + API surface."""
     C = _Commands
     if action == "crawl":
-        C.crawl(slug, start, depth, headed)
+        C.crawl(slug, start, depth, headed, limit, deadline)
     elif action == "apis":
         C.apis(slug)
     elif action == "surfaces":
         C.surfaces(slug, kind, limit)
     elif action == "graphql":
         C.graphql(slug, url)
+    elif action == "prune":
+        C.prune(slug)
     elif action == "tech":
         C.tech(url or slug)
     else:
