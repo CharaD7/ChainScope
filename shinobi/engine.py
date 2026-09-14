@@ -190,15 +190,19 @@ def encode_variants(payload: str) -> list[str]:
 
 class Engine:
     def __init__(self, scope_obj: scope_mod.ProgramScope, store: Store,
-                 roles: list[str] | None = None) -> None:
+                 roles: list[str] | None = None,
+                 session_factory: typing.Callable[[str], typing.Any] | None = None) -> None:
         self.scope = scope_obj
         self.store = store
         self.roles = roles or ["anonymous"]
+        self.session_factory = session_factory
         self.analyzer = Analyzer()
         self.outcomes: list[TestOutcome] = []
 
     # --------------------------------------------------------------- sessions
-    def _session_for(self, role: str) -> GuardedSession:
+    def _session_for(self, role: str) -> typing.Any:
+        if self.session_factory is not None:
+            return self.session_factory(role)
         # GuardedSession loads the stored cookie jar for (slug, role) itself.
         return GuardedSession(self.scope, self.store, role=role,
                               log_actor="shinobi-engine")
@@ -232,23 +236,30 @@ class Engine:
     def run(self, surfaces: list[dict] | None = None,
             max_tests: int = 800) -> list[TestOutcome]:
         surfaces = surfaces if surfaces is not None else self.store.list_surfaces(self.scope.slug)
+        sessions = {role: self._session_for(role) for role in self.roles}
         ran = 0
-        for surf in surfaces:
-            if ran >= max_tests:
-                break
-            url, method = surf["url"], (surf["method"] or "GET").upper()
-            params = surf.get("params") or {}
-            for role in self.roles:
-                session = self._session_for(role)
-                baseline = self._fire(session, method, url, params=params, role=role)
-                if baseline.status == 0:
-                    continue
-                probe_params = list(params) + ["q", "id", "action", "email", "amount"]
-                for param in probe_params:
-                    if ran >= max_tests:
-                        break
-                    ran += 1
-                    self._test_param(session, method, url, param, role, baseline)
+        try:
+            for surf in surfaces:
+                if ran >= max_tests:
+                    break
+                url, method = surf["url"], (surf["method"] or "GET").upper()
+                params = surf.get("params") or {}
+                for role in self.roles:
+                    session = sessions[role]
+                    baseline = self._fire(session, method, url, params=params, role=role)
+                    if baseline.status == 0:
+                        continue
+                    probe_params = list(params) + ["q", "id", "action", "email", "amount"]
+                    for param in probe_params:
+                        if ran >= max_tests:
+                            break
+                        ran += 1
+                        self._test_param(session, method, url, param, role, baseline)
+        finally:
+            for session in sessions.values():
+                close = getattr(session, "close", None)
+                if callable(close):
+                    close()
         return self.outcomes
 
     def _test_param(self, session: GuardedSession, method: str, url: str,
