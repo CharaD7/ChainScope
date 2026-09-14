@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import typing
 import urllib.parse
 
@@ -62,13 +63,14 @@ class Crawler:
 
     def __init__(self, scope_obj: scope_mod.ProgramScope, store: Store,
                  role: str = "default", depth: int = 2, headless: bool = True,
-                 max_pages: int = 60) -> None:
+                 max_pages: int = 60, deadline: float = 150.0) -> None:
         self.scope = scope_obj
         self.store = store
         self.role = role
         self.depth = depth
         self.headless = headless
         self.max_pages = max_pages
+        self.deadline = deadline
         self._chrome = _chrome_path()
 
     # ------------------------------------------------------------ crawl driver
@@ -82,6 +84,7 @@ class Crawler:
         seen: set[str] = set()
         queued: list[tuple[str, int]] = [(u, 0) for u in start_urls]
         tech: dict[str, typing.Any] = {}
+        t0 = time.monotonic()
 
         with sync_playwright() as pw:
             browser = pw.chromium.launch(
@@ -109,6 +112,8 @@ class Crawler:
             ctx.on("request", _on_request)
 
             while queued and len(pages) < self.max_pages:
+                if time.monotonic() - t0 > self.deadline:
+                    break
                 url, d = queued.pop(0)
                 if url in seen or not self.scope.authorized(url):
                     continue
@@ -116,10 +121,10 @@ class Crawler:
                     continue
                 seen.add(url)
                 try:
-                    page.goto(url, wait_until="networkidle", timeout=30000)
+                    page.goto(url, wait_until="networkidle", timeout=20000)
                 except Exception:  # noqa: BLE001
                     try:
-                        page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                        page.goto(url, wait_until="domcontentloaded", timeout=12000)
                     except Exception:  # noqa: BLE001
                         continue
                 title = ""
@@ -139,7 +144,7 @@ class Crawler:
                         queued.append((href, d + 1))
             browser.close()
 
-        endpoints = extract_endpoints(bundles, start_urls)
+        endpoints = extract_endpoints(bundles, start_urls, deadline=self.deadline)
         result = CrawlResult(pages=pages, requests=requests, tech=tech,
                              bundles=sorted(set(bundles)), endpoints=endpoints)
         self._persist(result)
@@ -204,9 +209,13 @@ class Crawler:
     # ---------------------------------------------------------------- persist
     def _persist(self, result: CrawlResult) -> None:
         self.store.clear_surfaces(self.scope.slug)
-        # dedupe endpoints to (kind, host, path, method)
+        # dedupe endpoints to (kind, host, path, method); only in-scope hosts
         seen: set[tuple] = set()
         for ep in result.endpoints:
+            if not self.scope.authorized(ep["url"]):
+                continue
+            if "${" in ep["url"] or "{" in ep["url"]:
+                continue
             host = scope_mod.hostname(ep["url"])
             path = urllib.parse.urlsplit(ep["url"]).path
             key = ("api", host, path, ep["method"])
@@ -261,7 +270,8 @@ def parse_query(url: str) -> dict[str, str]:
         urllib.parse.urlsplit(url).query)}
 
 
-def extract_endpoints(bundles: list[str], roots: list[str] | None = None) -> list[dict]:
+def extract_endpoints(bundles: list[str], roots: list[str] | None = None,
+                      deadline: float = 60.0) -> list[dict]:
     """Extract candidate API endpoints from JS bundle URLs.
 
     Fetches each bundle with a raw client (no scope guard - these are the
@@ -271,8 +281,9 @@ def extract_endpoints(bundles: list[str], roots: list[str] | None = None) -> lis
     """
     endpoints: list[dict] = []
     roots = roots or []
+    t0 = time.monotonic()
     for index, url in enumerate(sorted(set(bundles))):
-        if len(endpoints) > 400:
+        if len(endpoints) > 400 or time.monotonic() - t0 > deadline:
             break
         try:
             text = _raw_get(url)
@@ -346,7 +357,26 @@ def _absolutize(path: str, host: str) -> str:
         if not path.startswith("//"):
             return path
         return "https:" + path
+    if not path.startswith("/") and HOSTNAME_HEAD_RE.match(path):
+        return "https://" + path
+    # a leading path segment that itself looks like a hostname is a literal URL
+    # glued by the codebase, not a path on the program host
+    segs = path.lstrip("/").split("/")
+    first = segs[0] if segs else ""
+    if path.startswith("/") and "." in first and HOST_SEG_RE.match(first):
+        return "https://" + path.lstrip("/")
     return f"https://{host}{path if path.startswith('/') else '/' + path}"
+
+
+HOSTNAME_HEAD_RE = re.compile(
+    r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?::[0-9]+)?(?:/|$)")
+HOST_SEG_RE = re.compile(
+    r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$")
+
+
+def host_seg_looks_host(seg: str) -> bool:
+    """True when a single path segment is shaped like a hostname."""
+    return bool(seg and "." in seg and HOST_SEG_RE.match(seg))
 
 
 def graphql_introspect(caller: typing.Callable, url: str,

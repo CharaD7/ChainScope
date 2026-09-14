@@ -169,7 +169,7 @@ class Store:
                     in_scope_json, oos_json, rules_json, eligibility_json,
                     created_at, updated_at)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-                   ON CONFLICT(id) DO UPDATE SET
+                   ON CONFLICT DO UPDATE SET
                      slug=excluded.slug, platform=excluded.platform,
                      name=excluded.name, url=excluded.url,
                      max_bounty=excluded.max_bounty,
@@ -189,7 +189,10 @@ class Store:
                     program.get("created_at") or _now(), _now(),
                 ),
             )
-        return pid
+            # the surviving row may keep a different id (slug collision)
+            row = conn.execute(
+                "SELECT id FROM programs WHERE slug=?", (program["slug"],)).fetchone()
+        return row["id"] if row else pid
 
     def get_program(self, slug: str) -> dict | None:
         with self._conn() as conn:
@@ -320,6 +323,16 @@ class Store:
     def clear_surfaces(self, program_id: str) -> None:
         with self._conn() as conn:
             conn.execute("DELETE FROM surfaces WHERE program_id=?", (program_id,))
+
+    def delete_surfaces(self, program_id: str, ids: list[str]) -> int:
+        if not ids:
+            return 0
+        placeholders = ",".join("?" * len(ids))
+        with self._conn() as conn:
+            cur = conn.execute(
+                f"DELETE FROM surfaces WHERE program_id=? AND id IN ({placeholders})",
+                [program_id, *ids])
+        return cur.rowcount
 
     # ---------------------------------------------------------------- findings
     def add_finding(self, program_id: str, surface_id: str | None, title: str,
