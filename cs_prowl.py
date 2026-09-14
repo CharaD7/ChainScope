@@ -34,10 +34,20 @@ class _Commands:
         return scope_mod.scope_from_program_record(rec)
 
     @staticmethod
-    def run(slug: str, roles: list[str], limit: int, max_tests: int) -> None:
+    def run(slug: str, roles: list[str], limit: int, max_tests: int,
+            transport: str) -> None:
         roles = list(dict.fromkeys(roles)) or ["anonymous"]
         scope_obj = _Commands._scope(slug)
-        engine = eng.Engine(scope_obj, _db, roles=roles)
+        factory = None
+        if transport == "browser":
+            from shinobi.browser import BrowserSession
+            def factory(role: str) -> BrowserSession:  # noqa: E306
+                return BrowserSession(scope_obj, _db, role=role)
+        elif transport != "httpx":
+            typer.echo(f"cs_prowl: unknown transport '{transport}'", err=True)
+            raise typer.Exit(1)
+        engine = eng.Engine(scope_obj, _db, roles=roles,
+                            session_factory=factory)
         try:
             outcomes = engine.run(max_tests=max_tests)
         except Exception as exc:  # noqa: BLE001
@@ -121,11 +131,12 @@ def prowl(
     roles: list[str] = typer.Option(["anonymous"], "--role", help="role(s) to test with"),
     limit: int = typer.Option(30, "--limit", help="max rows/outcomes printed"),
     max_tests: int = typer.Option(800, "--max-tests", help="engine request budget"),
+    transport: str = typer.Option("httpx", "--transport", help="httpx|browser session transport"),
 ):
     """Shinobi testing engine: triage payloads, role-diff, chain plans."""
     C = _Commands
     if action == "run":
-        C.run(slug, roles, limit, max_tests)
+        C.run(slug, roles, limit, max_tests, transport)
     elif action == "findings":
         C.findings(slug, limit)
     elif action == "chains":
