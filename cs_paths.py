@@ -12,6 +12,7 @@ def paths(
     db: str = typer.Option("graph.db", help="Database path"),
     from_label: str = typer.Option(..., "--from", help="Source function label"),
     to_label: str = typer.Option(..., "--to", help="Target function label"),
+    to_sink: str = typer.Option("", "--to-sink", help="Also target sinks of this type: fund_transfer | low_level_call | delegate | self_destruct"),
     max_depth: int = typer.Option(15, help="Maximum path depth"),
     max_paths: int = typer.Option(10, help="Maximum paths to find"),
     max_endpoint_matches: int = typer.Option(20, "--max-endpoint-matches", help="Max matching start/end nodes to search (0 = all)"),
@@ -36,6 +37,7 @@ def paths(
         show_guards=show_guards,
         show_state=show_state,
         exclude_research=exclude_research,
+        to_sink_type=to_sink,
     ))
 
     if "error" in result:
