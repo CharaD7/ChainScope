@@ -28,7 +28,7 @@ from mcp.server.fastmcp import FastMCP
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger("chainscope")
 
-mcp = FastMCP("chainscope")
+mcp = FastMCP("chainscope", host=os.environ.get("HOST", "0.0.0.0"), port=int(os.environ.get("PORT", 8000)))
 
 # Default DB path — can be overridden per-call
 DEFAULT_DB = os.environ.get("CHAINSCOPE_DB", os.environ.get("CHAINSCOPE_DB", "graph.db"))
