@@ -235,16 +235,29 @@ def _find_state_vars_bounded(
 ) -> tuple[list[dict], int, bool]:
     """Find matching state variables while retaining only rows needed by callers."""
     columns = "id, label, file, signature, metadata"
+    escaped = var.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     queries = (
         (
             f"SELECT {columns} FROM nodes "
             "WHERE type = 'state_var' AND label = ? ORDER BY file, id",
             (var,),
         ),
+        # Struct field / namespaced-storage field: label ends with ".<var>"
         (
             f"SELECT {columns} FROM nodes "
-            "WHERE type = 'state_var' AND label LIKE ? ORDER BY file, id",
-            (f"%{var}%",),
+            "WHERE type = 'state_var' AND label LIKE ? ESCAPE '\\' ORDER BY file, id",
+            (f"%.{escaped}",),
+        ),
+        # Struct field declared under a different label but with a matching field name
+        (
+            f"SELECT {columns} FROM nodes "
+            "WHERE type = 'state_var' AND metadata LIKE ? ESCAPE '\\' ORDER BY file, id",
+            (f'%"field":"{escaped}"%',),
+        ),
+        (
+            f"SELECT {columns} FROM nodes "
+            "WHERE type = 'state_var' AND label LIKE ? ESCAPE '\\' ORDER BY file, id",
+            (f"%{escaped}%",),
         ),
     )
     for sql, params in queries:
@@ -2392,7 +2405,15 @@ def _metadata_has_any_key(raw, keys: tuple[str, ...]) -> bool:
 
 def _has_access_control(meta: dict, guard_count: int) -> bool:
     """Treat modifiers, graph guard edges, and inferred inline role checks as access control."""
-    return bool(guard_count or meta.get("modifiers") or meta.get("role_guards") or meta.get("access_controls"))
+    return bool(
+        guard_count
+        or meta.get("modifiers")
+        or meta.get("role_guards")
+        or meta.get("sender_guards")
+        or meta.get("call_guards")
+        or meta.get("signature_guards")
+        or meta.get("access_controls")
+    )
 
 
 _HOTSPOT_SCORE_METADATA_KEYS = (
@@ -2428,6 +2449,9 @@ _HOTSPOT_SCORE_METADATA_KEYS = (
     "pure",
     "reentrancy_risk",
     "role_guards",
+    "sender_guards",
+    "call_guards",
+    "signature_guards",
     "signature_risk",
     "slippage_risk",
     "sql_injection_risk",
@@ -3598,7 +3622,6 @@ def cs_defi(
             "flash_loan_risk",
             "slippage_risk",
             "erc_callback_risk",
-            "anchor_risks",
             "cpi_reentrancy_risk",
             "transfer_sinks",
             "cross_contract_calls",
@@ -4482,6 +4505,38 @@ def cs_sinks(
         conn.close()
 
 
+_SINK_TYPE_ALIASES = {
+    "transfer": "fund_transfer",
+    "send": "fund_transfer",
+    "fund_transfer": "fund_transfer",
+    "fund-transfer": "fund_transfer",
+    "call": "low_level_call",
+    "low_level_call": "low_level_call",
+    "low-level-call": "low_level_call",
+    "delegatecall": "delegate",
+    "delegate": "delegate",
+    "selfdestruct": "self_destruct",
+    "self_destruct": "self_destruct",
+}
+
+
+def _find_sink_nodes_by_type(conn, sink_type: str, exclude_research: bool, limit: int):
+    """Return sink nodes whose metadata sink_type matches (e.g. 'fund_transfer')."""
+    columns = "id, label, file, signature, metadata, visibility"
+    rows: list[dict] = []
+    total = 0
+    for row in conn.execute(
+        f"SELECT {columns} FROM nodes WHERE type = 'function' AND metadata LIKE ?",
+        (f'%"sink_type": "{sink_type}"%',),
+    ):
+        if exclude_research and _is_research_metadata_raw(row["metadata"]):
+            continue
+        if limit == 0 or len(rows) < limit:
+            rows.append(dict(row))
+        total += 1
+    return rows, total
+
+
 @mcp.tool()
 def cs_paths(
     from_label: str,
@@ -4497,6 +4552,7 @@ def cs_paths(
     show_state: bool = False,
     exclude_research: bool = False,
     timeout_seconds: int = 0,
+    to_sink_type: str = "",
 ) -> str:
     """Find call paths between two functions in the knowledge graph.
 
@@ -4517,6 +4573,8 @@ def cs_paths(
         show_state: Annotate each hop with state variable reads/writes
         exclude_research: Exclude nodes originating from research-mode files
         timeout_seconds: Optional SQLite query budget before returning an error (0 disables)
+        to_sink_type: Also treat every sink node of this type (e.g. "fund_transfer",
+            "low_level_call", "delegate") as a target endpoint.
     """
     if max_paths < 0:
         max_paths = 0
@@ -4567,6 +4625,21 @@ def cs_paths(
             exclude_research,
             endpoint_retain_limit,
         )
+
+        # Sink-type endpoints: let `--to transfer` (and `--to-sink fund_transfer`)
+        # also match low-level `call`/`send` sinks by their semantic sink type,
+        # so external-call fund flows are reachable as path targets.
+        sink_type = to_sink_type or _SINK_TYPE_ALIASES.get(to_label.strip().lower(), "")
+        if sink_type:
+            sink_rows, sink_total = _find_sink_nodes_by_type(
+                conn, sink_type, exclude_research, endpoint_retain_limit
+            )
+            existing_ids = {n["id"] for n in to_nodes}
+            for row in sink_rows:
+                if row["id"] not in existing_ids:
+                    to_nodes.append(row)
+                    existing_ids.add(row["id"])
+            to_matches_total += sink_total
 
         for node in from_nodes + to_nodes:
             node_by_id[node["id"]] = node
