@@ -16,6 +16,14 @@ Output: one row per class: [potential-signal | clean | n/a] + file:line of the h
 """
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+_PARENT = str(Path(__file__).resolve().parent.parent)
+if _PARENT not in sys.path:
+    sys.path.insert(0, _PARENT)
+
+
 import pathlib
 import re
 import sys

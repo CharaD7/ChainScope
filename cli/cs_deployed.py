@@ -14,13 +14,21 @@ Usage:
 """
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+_PARENT = str(Path(__file__).resolve().parent.parent)
+if _PARENT not in sys.path:
+    sys.path.insert(0, _PARENT)
+
+
 import json
 import re
 import typing
 
 import typer
 
-from cs_discover import fetch_assets
+from core.cs_discover import fetch_assets
 
 app = typer.Typer()
 

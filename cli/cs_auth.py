@@ -16,6 +16,14 @@ Requires CHAINSCOPE_KEY or a key written by `cs_scope keygen`.
 """
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+_PARENT = str(Path(__file__).resolve().parent.parent)
+if _PARENT not in sys.path:
+    sys.path.insert(0, _PARENT)
+
+
 import json
 import os
 import pathlib

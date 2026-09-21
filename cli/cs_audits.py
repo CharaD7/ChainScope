@@ -16,6 +16,14 @@ Reports are downloaded once (cached) and searched with pdftotext. Requires `pdft
 """
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+_PARENT = str(Path(__file__).resolve().parent.parent)
+if _PARENT not in sys.path:
+    sys.path.insert(0, _PARENT)
+
+
 import pathlib
 import re
 import shutil
