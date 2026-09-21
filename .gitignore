@@ -2,6 +2,7 @@
 /core/__pycache__
 /core/web3/__pycache__
 /tests/__pycache__
+/cli/__pycache__
 /.claude
 /docs/superpowers
 Dockerfile.sandbox
@@ -10,6 +11,7 @@ AGENTS.md
 /.venv
 tests/.DS_Store
 .DS_Store
+typer_shim.py.bak
 
 # ChainScope fetch materialisation output
 .chainsource/

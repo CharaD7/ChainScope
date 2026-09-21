@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+
+import sys
+from pathlib import Path
+
+_PARENT = str(Path(__file__).resolve().parent.parent)
+if _PARENT not in sys.path:
+    sys.path.insert(0, _PARENT)
+
 """Profile a repository or workspace before building a ChainScope graph."""
 import json
 import typer
