@@ -200,5 +200,125 @@ def keizo_rank(
         typer.echo(json.dumps(rows, indent=2))
 
 
+_EXPLORER_CHAINS = (
+    "etherscan.io",
+    "basescan.org",
+    "arbiscan.io",
+    "optimism.",
+    "cronoscan.com",
+    "explorer.cronos.org",
+    "zkevm.cronos.org",
+    "polygonscan.com",
+    "bscscan.com",
+    "snowtrace.io",
+    "ftmscan.com",
+)
+
+_HOST_CHAINS = {
+    "explorer.cronos.com": "25",
+    "cronoscan.com": "25",
+    "cronos.org": "25",
+    "explorer.zkevm.cronos.org": "388",
+}
+
+
+def _hacken_scope(program_url: str, timeout: int = 30) -> dict[str, typing.Any]:
+    """Scrape a HackenProof program page for in-scope contract addresses + repos.
+
+    Returns {"addresses": [{"chain": explorer_host, "address": 0x..}], "repos": [github urls]}.
+    Explorer host is kept as the Sourcify chain spec (deploy_source resolves it).
+    """
+    import re
+
+    req = urllib.request.Request(program_url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8", "ignore")
+    addresses: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for m in re.finditer(r"https?://([^/\"' ]+)/[^\"' ]*?(?:address|token)/(0x[0-9a-fA-F]{40})", raw):
+        host, addr = m.group(1), m.group(2)
+        key = addr.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        chain = _HOST_CHAINS.get(host, host)
+        addresses.append({"chain": chain, "address": addr})
+    repos = sorted(set(re.findall(r"https?://github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+", raw)))
+    return {"addresses": addresses, "repos": repos}
+
+
+@app.command(name="triage")
+def triage(
+    slug: str = typer.Argument(..., help="HackenProof program slug (e.g. 'cronos-smart-contracts')"),
+    max_fetch: int = typer.Option(12, "--max-fetch", help="Max deployed addresses to fetch+index"),
+    timeout: int = typer.Option(200, "--timeout", help="Graph build timeout seconds"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
+    """Automate the manual pipeline: scrape scope -> fetch sources -> build graph -> surface.
+
+    Stops at hotspot ranking + rule-hint pre-filter. Verdict + PoC stay manual.
+    """
+    from core import deploy_source
+
+    program_url = f"https://hackenproof.com/programs/{slug}"
+    scope = _hacken_scope(program_url)
+    addrs = scope["addresses"][: int(max_fetch)]
+    typer.echo(f"{slug}: {len(scope['addresses'])} in-scope addresses, {len(scope['repos'])} repos; fetching {len(addrs)}.")
+    for r in scope["repos"][:10]:
+        typer.echo(f"  repo: {r}")
+
+    out = f".chainsource/hacken-{slug}"
+    specs = [f"{a['chain']}:{a['address']}" for a in addrs]
+    results = deploy_source.fetch_many(specs, base_out=out) if specs else []
+    ok = [r for r in results if "error" not in r]
+    bad = [r for r in results if "error" in r]
+    for r in ok:
+        typer.echo(f"  [ok] {r['chain']}:{r['address']} files={r['files']}")
+    for r in bad:
+        typer.echo(f"  [err] {r['spec']}: {r['error']}", err=True)
+    if not ok:
+        typer.echo("No sources fetched; triage stops here.", err=True)
+        raise typer.Exit(1)
+
+    import mcp_server
+
+    db = f"hacken-{slug}.db"
+    try:
+        data = json.loads(mcp_server.cs_build(
+            repo_path=out, db=db, lang="solidity",
+            include_research=False, timeout_seconds=int(timeout), max_failure_examples=5,
+        ))
+        typer.echo(
+            f"graph: {data['nodes']} nodes, {data['edges']} edges, "
+            f"{data['files_indexed']}/{data['files_considered']} files"
+        )
+    except Exception as exc:  # noqa: BLE001
+        typer.echo(f"graph build failed: {exc}", err=True)
+        raise typer.Exit(1)
+
+    import subprocess
+
+    subprocess.run(
+        [sys.executable, "-m", "cli", "surface", "surface", db, "--top", "25", "--json"],
+        check=False, capture_output=True,
+    )
+    hotspots: list[dict[str, typing.Any]] = []
+    try:
+        surf = json.loads(Path(f"{Path(db).stem}_surface/hotspots.json").read_text())
+        items = surf if isinstance(surf, list) else surf.get("hotspots", surf.get("items", []))
+        hotspots = items[:25] if isinstance(items, list) else []
+    except Exception:  # noqa: BLE001
+        pass
+    typer.echo(f"top hotspots ({db}):")
+    for h in hotspots[:15]:
+        typer.echo(
+            f"  {h.get('function', '?')} {h.get('file', '?')}:{h.get('line', '?')} "
+            f"score={h.get('score', '?')} [{','.join(h.get('reasons', [])[:4])}]"
+        )
+    typer.echo("Next: read flagged functions, adjudicate vs program rules, build fork PoC for survivors.")
+    if json_output:
+        typer.echo(json.dumps({"scope": scope, "fetched": len(ok), "errors": len(bad), "hotspots": hotspots}, indent=2))
+
+
 if __name__ == "__main__":
     app()
