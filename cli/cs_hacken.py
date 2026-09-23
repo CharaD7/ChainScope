@@ -116,5 +116,89 @@ def list_programs(
         typer.echo(json.dumps(rows, indent=2))
 
 
+def _keizo_score(p: dict[str, typing.Any], now: float) -> dict[str, typing.Any]:
+    """Keizo-style program score from catalog signals.
+
+    Methodology (cf. README `cs_target`): prefer fresh, thin-hunted,
+    self-written smart-contract targets with reachable money paths.
+    Catalog-level proxies used here (contract-level permissionless-path
+    scoring still needs per-program fetch + triage):
+      - thin_hunt: fewer submitted reports => less picked-over (0..1)
+      - fresh: recently updated program => newer scope/assets (0..1)
+      - payout: log-scaled max bounty (0..1)
+      - open_gate: no reputation requirement => less competition (0/1)
+      - sc: smart-contract scope (0/1)
+    """
+    import datetime
+    import math
+
+    reports = p["submitted_reports"] or 0
+    thin_hunt = 1.0 / (1.0 + reports / 100.0)
+    try:
+        updated = datetime.datetime.strptime(p["updated_at"], "%d %b %Y").timestamp()
+        fresh = max(0.0, 1.0 - (now - updated) / (365 * 86400))
+    except (ValueError, TypeError):
+        fresh = 0.0
+    payout = min(1.0, math.log10(1.0 + float(p["max_bounty"] or 0)) / 6.0)
+    open_gate = 1.0 if p["min_reputation_points"] is None else 0.0
+    labels = p.get("labels") or {}
+    sc = 1.0 if "smart contract" in (labels.get("types") or []) else 0.0
+    score = round(0.35 * thin_hunt + 0.25 * fresh + 0.20 * payout + 0.10 * open_gate + 0.10 * sc, 3)
+    row = _row(p)
+    row["keizo"] = score
+    row["signals"] = {
+        "thin_hunt": round(thin_hunt, 3),
+        "fresh": round(fresh, 3),
+        "payout": round(payout, 3),
+        "open_gate": open_gate,
+        "sc": sc,
+    }
+    return row
+
+
+@app.command(name="keizo")
+def keizo_rank(
+    max_rep: int = typer.Option(80, "--max-rep", help="Max reputation requirement (null = no gate, always included)"),
+    min_bounty: float = typer.Option(0, "--min-bounty", help="Min max-bounty in USD"),
+    only_sc: bool = typer.Option(False, "--only-sc", help="Only smart-contract scope programs"),
+    no_audits: bool = typer.Option(True, "--no-audits/--with-audits", help="Exclude audit contests"),
+    top: int = typer.Option(15, "--top", help="How many programs to list"),
+    refresh: bool = typer.Option(False, "--refresh", help="Force re-fetch (ignore 24h cache)"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
+    """Rank HackenProof programs Keizo-style: thin-hunted + fresh + payout + open gate + SC."""
+    programs = _load(refresh)
+    now = time.time()
+    rows = [
+        _keizo_score(p, now)
+        for p in programs
+        if (p["status"] or {}).get("name") == "Active"
+        and (p["min_reputation_points"] is None or p["min_reputation_points"] <= max_rep)
+        and float(p["max_bounty"] or 0) >= min_bounty
+        and (not no_audits or not p["audit_program"])
+    ]
+    if only_sc:
+        rows = [r for r in rows if r["sc"]]
+    rows.sort(key=lambda r: r["keizo"], reverse=True)
+    rows = rows[: int(top)]
+
+    if not rows:
+        typer.echo("No programs match the filters.", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"Keizo ranking (rep<={max_rep}, max>={min_bounty:g}):")
+    for r in rows:
+        s = r["signals"]
+        typer.echo(
+            f"  keizo={r['keizo']:.3f}  reports={r['reports']:5d}  rep={str(r['rep']):>4s}  "
+            f"up to ${r['max_bounty']:>10,.0f}  {'[SC] ' if r['sc'] else ''}{r['title']}"
+        )
+        typer.echo(
+            f"      thin={s['thin_hunt']:.2f} fresh={s['fresh']:.2f} payout={s['payout']:.2f} "
+            f"open_gate={s['open_gate']:.0f} sc={s['sc']:.0f}  {r['url']}"
+        )
+    if json_output:
+        typer.echo(json.dumps(rows, indent=2))
+
+
 if __name__ == "__main__":
     app()
