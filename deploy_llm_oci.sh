@@ -168,8 +168,19 @@ if [ ! -d "$HOME/ChainScope" ]; then
     git clone https://github.com/Immunefi/ChainScope.git "$HOME/ChainScope"
 fi
 cd "$HOME/ChainScope"
-export PORT=8001
-./run_mcp.sh &
+log "Starting Nginx reverse‑proxy with TLS termination"
+# Pull a minimal nginx image (if not already present)
+if ! docker image inspect nginx:stable-alpine > /dev/null 2>&1; then
+    docker pull nginx:stable-alpine
+fi
+# Run Nginx, mounting the config and self‑signed certs from the repo
+docker run -d \
+    --name chainscope-nginx \
+    -p 80:80 -p 443:443 \
+    -v "$(pwd)/nginx.conf:/etc/nginx/nginx.conf:ro" \
+    -v "$(pwd)/ssl:/etc/nginx/ssl:ro" \
+    nginx:stable-alpine
+log "✅ Nginx container ready – HTTPS endpoint is https://$PUBLIC_IP/"
 EOSSH
 
 log "✅ Deployment complete! 🎉"

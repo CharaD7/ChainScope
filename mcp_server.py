@@ -6257,7 +6257,7 @@ def shinobi_scopes() -> str:
     return _shinobi_payload([
         {"slug": r.get("slug"), "platform": r.get("platform"),
          "name": r.get("name"), "max_bounty": r.get("max_bounty"),
-         "live": r.get("paused") is not True,
+         "live": (r.get("live") if "live" in r else (r.get("paused") is not True)),
          "assets": len(r.get("in_scope") or [])}
         for r in rows
     ])
