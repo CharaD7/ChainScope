@@ -68,7 +68,7 @@ def fetch_assets(slug: str, timeout: int = 30) -> list[dict[str, typing.Any]]:
         if not url or url in seen:
             continue
         seen.add(url)
-        if "scan.io/address" in url or "github.com" in url:
+        if ("scan.io/address" in url or "scan.com/address" in url or "github.com" in url):
             assets.append({
                 "url": url,
                 "addedAt": added[:10],
