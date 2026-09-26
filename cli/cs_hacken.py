@@ -92,11 +92,11 @@ def list_programs(
     rows = [
         _row(p)
         for p in programs
-        if (p["status"] or {}).get("name", "").lower() == "active"
-        and (p["min_reputation_points"] is None or p["min_reputation_points"] <= max_rep)
-        and float(p["max_bounty"] or 0) >= min_bounty
-        and (not no_audits or not p["audit_program"])
-    ]
+if str(p["status"].get("name", "") or "").lower() == "active"
+         and (p["min_reputation_points"] is None or p["min_reputation_points"] <= max_rep)
+         and float(p["max_bounty"] or 0) >= min_bounty
+         and (not no_audits or not p["audit_program"])
+     ]
     if only_sc:
         rows = [r for r in rows if r["sc"]]
     key = {"submissions": lambda r: r["reports"], "bounty": lambda r: r["max_bounty"], "rep": lambda r: (r["rep"] is None, r["rep"] or 0)}[sort]
@@ -172,11 +172,11 @@ def keizo_rank(
     rows = [
         _keizo_score(p, now)
         for p in programs
-        if (p["status"] or {}).get("name") == "Active"
-        and (p["min_reputation_points"] is None or p["min_reputation_points"] <= max_rep)
-        and float(p["max_bounty"] or 0) >= min_bounty
-        and (not no_audits or not p["audit_program"])
-    ]
+if str(p["status"].get("name") or "") == "Active"
+         and (p["min_reputation_points"] is None or p["min_reputation_points"] <= max_rep)
+         and float(p["max_bounty"] or 0) >= min_bounty
+         and (not no_audits or not p["audit_program"])
+     ]
     if only_sc:
         rows = [r for r in rows if r["sc"]]
     rows.sort(key=lambda r: r["keizo"], reverse=True)
