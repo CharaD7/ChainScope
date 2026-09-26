@@ -42,6 +42,7 @@ from cli.cs_fetch import app as fetch_app
 from cli.cs_re import app as re_app
 from cli.cs_hacken import app as hacken_app
 from cli.cs_google import app as google_app
+from cli.cs_intigriti import app as intigriti_app
 from cli.cs_pays import app as pays_app
 from core.cs_discover import app as discover_app
 
@@ -74,6 +75,7 @@ app.add_typer(fetch_app, name="fetch")
 app.add_typer(re_app, name="re")
 app.add_typer(hacken_app, name="hacken")
 app.add_typer(google_app, name="google")
+app.add_typer(intigriti_app, name="intigriti")
 app.add_typer(pays_app, name="pays")
 app.add_typer(discover_app, name="discover")
 
