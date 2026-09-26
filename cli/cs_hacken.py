@@ -92,7 +92,7 @@ def list_programs(
     rows = [
         _row(p)
         for p in programs
-        # No status filter – include all programs regardless of activity
+        if (p["status"] or {}).get("name", "").lower() == "active"
         and (p["min_reputation_points"] is None or p["min_reputation_points"] <= max_rep)
         and float(p["max_bounty"] or 0) >= min_bounty
         and (not no_audits or not p["audit_program"])
