@@ -14,6 +14,7 @@ import json
 import os
 import pathlib
 import typing
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -58,6 +59,38 @@ def chain_id(value: str) -> int:
     raise ValueError(f"unrecognised chain: {value}")
 
 
+class NotVerifiedError(RuntimeError):
+    """Contract exists on chain but has no Sourcify match (HTTP 404 + match=null)."""
+
+
+class UnreachableError(RuntimeError):
+    """Host answered with a non-JSON body (rate limit, captive portal, HTML error page)."""
+
+
+def _sourcify_get(url: str, timeout: int) -> tuple[int, typing.Any]:
+    """GET a Sourcify v2 endpoint, tolerating its 404+JSON-body convention.
+
+    Sourcify answers an unverified contract with HTTP 404 *and* a well-formed JSON body
+    (``{"match": null, ...}``). ``urlopen`` raises ``HTTPError`` on that 404 before any
+    body is read, which would otherwise mask "not verified" as a network failure.
+    """
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raw = exc.read()
+        try:
+            return exc.code, json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            # Genuine transport/endpoint failure, or a rate limiter serving HTML.
+            raise UnreachableError(
+                f"Sourcify returned HTTP {exc.code} with a non-JSON body for {url}"
+            ) from exc
+    except urllib.error.URLError as exc:
+        raise UnreachableError(f"cannot reach Sourcify for {url}: {exc.reason}") from exc
+
+
 def fetch_sourcify_source(
     chain: str | int,
     address: str,
@@ -69,6 +102,10 @@ def fetch_sourcify_source(
     full source tree (preserving relative import paths) under ``out_dir``.
 
     Returns a small metadata dict (match status, verifiedAt, files written, total sources).
+
+    Raises:
+        NotVerifiedError: chain/address is known but carries no Sourcify match.
+        UnreachableError: the host was unreachable or answered with a non-JSON body.
     """
     chain = int(chain)
     address = address.strip().lower()
@@ -76,16 +113,14 @@ def fetch_sourcify_source(
         raise ValueError(f"invalid contract address: {address}")
 
     url = f"https://sourcify.dev/server/v2/contract/{chain}/{address}?fields=all"
-    req = urllib.request.Request(url, headers={"Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        payload = json.loads(resp.read().decode("utf-8"))
+    _status, payload = _sourcify_get(url, timeout)
 
     if not isinstance(payload, dict):
-        raise RuntimeError(f"unexpected Sourcify response for {chain}:{address}")
+        raise UnreachableError(f"unexpected Sourcify response for {chain}:{address}")
 
     match = payload.get("match")
     if match in (None, "null", ""):
-        raise RuntimeError(
+        raise NotVerifiedError(
             f"{chain}:{address} is not Sourcify-verified (match={match!r}) "
             f"-> use Etherscan/Blockscout instead"
         )
@@ -147,7 +182,12 @@ def fetch_many(
     timeout: int = 90,
     **_unused: typing.Any,
 ) -> list[dict[str, typing.Any]]:
-    """Fetch several ``chain:address`` specs into sibling directories under base_out."""
+    """Fetch several ``chain:address`` specs into sibling directories under base_out.
+
+    Each result carries an ``error`` plus an ``error_kind`` of ``not_verified``,
+    ``unreachable`` or ``error`` so callers can tell an absent match apart from a
+    transport failure.
+    """
     results = []
     for spec in specs:
         try:
@@ -160,6 +200,48 @@ def fetch_many(
                     timeout=timeout,
                 )
             )
+        except NotVerifiedError as exc:
+            results.append({"spec": spec, "error": str(exc), "error_kind": "not_verified"})
+        except UnreachableError as exc:
+            results.append({"spec": spec, "error": str(exc), "error_kind": "unreachable"})
         except Exception as exc:  # noqa: BLE001 - report per-spec and continue
-            results.append({"spec": spec, "error": str(exc)})
+            results.append({"spec": spec, "error": str(exc), "error_kind": "error"})
     return results
+
+
+def coverage(
+    specs: list[str],
+    *,
+    timeout: int = 30,
+    limit: int | None = None,
+) -> dict[str, typing.Any]:
+    """Probe how many of ``specs`` are Sourcify-verified, without downloading sources.
+
+    Cheap enough to run before a full ``fetch_many`` so a program with no published
+    sources is identified in seconds instead of after N identical failures.
+    """
+    checked = specs[: int(limit)] if limit else specs
+    verified: list[str] = []
+    unverified: list[str] = []
+    unreachable: list[str] = []
+    for spec in checked:
+        chain_token, _, addr = spec.partition(":")
+        # No `fields` selector: the bare v2 response is the only one that returns
+        # `match` without also transferring the whole source tree. Sourcify rejects
+        # `?fields=match` outright, and `?fields=compilation` omits the match key.
+        url = (
+            f"https://sourcify.dev/server/v2/contract/{chain_id(chain_token)}/"
+            f"{addr.strip().lower()}"
+        )
+        try:
+            _status, payload = _sourcify_get(url, timeout)
+            (verified if (payload or {}).get("match") else unverified).append(spec)
+        except UnreachableError:
+            unreachable.append(spec)
+    return {
+        "checked": len(checked),
+        "verified": verified,
+        "unverified": unverified,
+        "unreachable": unreachable,
+        "coverage": round(len(verified) / len(checked), 3) if checked else 0.0,
+    }
