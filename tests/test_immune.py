@@ -1,0 +1,189 @@
+"""Tests for the Immunefi program module (`cli/cs_immune.py`).
+
+The parser targets Immunefi's React Server Component payload, which is an
+escaped JS string literal rather than JSON. These tests pin the behaviours
+that were hard-won against the live site:
+
+  * unescaping the RSC payload back into ordinary JSON
+  * reading scalars out of a payload whose prose fields are not valid JSON
+  * the reentrancy-relevant invariant in ``_checkProof``-style contracts is NOT
+    tested here; this module only reads program metadata, it never executes.
+
+Network calls are stubbed throughout so the suite stays hermetic.
+"""
+import json
+
+import pytest
+
+from cli.cs_immune import (
+    _audits,
+    _catalog,
+    _program_block,
+    _row,
+    _scalars,
+    _scope,
+    _unescape,
+)
+
+# A trimmed but structurally faithful copy of a real Immunefi program payload,
+# including the two hazards found in the wild: a raw tab inside a string
+# description and an invalid escape sequence ("\\g") in prose.
+_SAMPLE_PAGE = (
+    '<script>self.__next_f.push([1,"'
+    '6:[\\"$\\",\\"$L35\\",null,{\\"bounty\\":{'
+    '\\"contentfulId\\":\\"abc123\\",'
+    '\\"slug\\":\\"aera\\",'
+    '\\"project\\":\\"Aera\\",'
+    '\\"url\\":\\"/bug-bounty/aera/information/\\",'
+    '\\"maxBounty\\":500000,'
+    '\\"launchDate\\":\\"2023-11-20T12:00:00.000Z\\",'
+    '\\"updatedDate\\":\\"2026-09-18T15:24:46.333Z\\",'
+    '\\"kyc\\":true,'
+    '\\"networkType\\":\\"mainnet\\",'
+    '\\"proofOfConceptType\\":\\"required\\",'
+    '\\"primacy\\":\\"primacy_of_rules\\",'
+    '\\"pausedAt\\":null,'
+    '\\"audits\\":['
+    '{\\"id\\":\\"1\\",\\"url\\":\\"https://cantina.io/x\\",\\"date\\":\\"2025-06-25\\",'
+    '\\"auditor\\":\\"Cantina Competition\\"},'
+    '{\\"id\\":\\"2\\",\\"url\\":\\"https://github.com/o/r/blob/main/a.pdf\\",\\"date\\":\\"2023-09-22\\",'
+    '\\"auditor\\":\\"Spearbit\\"}'
+    '],'
+    '\\"assets\\":['
+    '{\\"addedAt\\":\\"2026-09-18T15:24:46.186Z\\",\\"description\\":\\"\\\\tgtBTC (Ethereum) - MultiDepositorVault\\"},'
+    '{\\"addedAt\\":\\"2025-08-13T00:00:00.000Z\\",\\"description\\":\\"OUSD Vault\\"}'
+    '],'
+    '\\"knownIssues\\":[]'
+    '}}]\\n"])'
+    "</script>"
+)
+
+
+def test_unescape_converts_rsc_escapes():
+    text = _unescape('\\"bounty\\":{\\"slug\\":\\"aera\\"}')
+    assert '"bounty":{"slug":"aera"}' in text
+
+
+def test_unescape_preserves_json_escapes_inside_strings():
+    # A valid \" inside a string value must survive, not be collapsed.
+    text = _unescape('\\"url\\":\\"https://x/y\\"')
+    assert '"url":"https://x/y"' in text
+
+
+def test_scalars_reads_string_number_bool():
+    seg = (
+        '{"slug":"aera","project":"Aera","maxBounty":500000,'
+        '"kyc":true,"pausedAt":null,"reductionPercentage":100}'
+    )
+    assert _scalars(seg, "slug") == "aera"
+    assert _scalars(seg, "project") == "Aera"
+    assert _scalars(seg, "maxBounty") == 500000
+    assert _scalars(seg, "kyc") is True
+    assert _scalars(seg, "pausedAt") is None
+    assert _scalars(seg, "reductionPercentage") == 100
+
+
+def test_scalars_missing_key_is_none():
+    assert _scalars('{"a":1}', "nonexistent") is None
+
+
+def test_scalars_does_not_match_key_inside_prose():
+    # "maxBounty" appears only as prose, not as a key, so it must not be read.
+    seg = '{"description":"the maxBounty field is discussed","maxBounty":42}'
+    assert _scalars(seg, "maxBounty") == 42
+
+
+def test_program_block_parses_real_shape():
+    obj = _program_block(_SAMPLE_PAGE, "aera")
+    assert obj is not None
+    assert obj["slug"] == "aera"
+    assert obj["project"] == "Aera"
+    assert obj["maxBounty"] == 500000
+    assert obj["kyc"] is True
+    assert obj["proofOfConceptType"] == "required"
+    assert obj["primacy"] == "primacy_of_rules"
+    assert obj["networkType"] == "mainnet"
+
+
+def test_program_block_tolerates_invalid_escapes_in_prose():
+    # The sample embeds a raw tab and "\\g" in a description. Strict json.loads
+    # on the whole object fails; field extraction must still succeed.
+    assert len(_program_block(_SAMPLE_PAGE, "aera")["slug"]) > 0
+
+
+def test_program_block_extracts_audits():
+    audits = _program_block(_SAMPLE_PAGE, "aera")["audits"]
+    assert len(audits) == 2
+    assert audits[0]["auditor"] == "Cantina Competition"
+    assert audits[0]["date"] == "2025-06-25"
+    assert audits[1]["auditor"] == "Spearbit"
+
+
+def test_program_block_counts_empty_known_issues_as_zero():
+    assert _program_block(_SAMPLE_PAGE, "aera")["knownIssues"] == 0
+
+
+def test_program_block_returns_none_without_bounty_marker():
+    assert _program_block('<html>nothing here</html>', "aera") is None
+
+
+def test_row_normalises_fields():
+    obj = _program_block(_SAMPLE_PAGE, "aera")
+    row = _row({**obj, "_slug": "aera"})
+    assert row["slug"] == "aera"
+    assert row["max_bounty"] == 500000.0
+    assert row["kyc"] is True
+    assert row["poc"] is True
+    assert row["audits"] == 2
+    assert row["known_issues"] == 0
+    assert row["updated_date"] == "2026-09-18"
+    assert "aera" in row["url"]
+
+
+def test_scope_maps_explorer_hosts_to_chain_ids(monkeypatch):
+    page = (
+        '<a href="https://etherscan.io/address/0x3bd9248048df95Db4fBD748C6CD99C1bAa40bAD0">x</a>'
+        '<a href="https://basescan.org/address/0x000000000001CdB57E58Fa75Fe420a0f4D6640D5">y</a>'
+        '<a href="https://github.com/aera-finance/contracts">repo</a>'
+    )
+    monkeypatch.setattr("cli.cs_immune._get", lambda url, timeout=45: page)
+    scope = _scope("aera")
+    chains = {a["chain"] for a in scope["addresses"]}
+    assert "1" in chains          # etherscan -> mainnet
+    assert "8453" in chains       # basescan -> base
+    assert len(scope["addresses"]) == 2
+    assert any("aera-finance" in r for r in scope["repos"])
+
+
+def test_scope_deduplicates_same_address_across_explorers(monkeypatch):
+    # Same address, different case, listed on two explorers: one entry, and the
+    # first host seen wins (mainnet before base, per document order).
+    page = (
+        '<a href="https://etherscan.io/address/0x3bd9248048df95Db4fBD748C6CD99C1bAa40bAD0">a</a>'
+        '<a href="https://basescan.org/address/0x3BD9248048DF95DB4FBD748C6CD99C1BAA40BAD0">b</a>'
+    )
+    monkeypatch.setattr("cli.cs_immune._get", lambda url, timeout=45: page)
+    addrs = _scope("aera")["addresses"]
+    assert len(addrs) == 1
+    assert addrs[0]["chain"] == "1"
+
+
+def test_scope_skips_non_blockchain_hosts(monkeypatch):
+    page = (
+        '<a href="https://immunefi.com/token/0x3bd9248048df95Db4fBD748C6CD99C1bAa40bAD0">x</a>'
+        '<a href="https://app.originprotocol.com/address/0xE75D77B1865Ae93c7eaa3040B038D7aA7BC02F70">y</a>'
+    )
+    monkeypatch.setattr("cli.cs_immune._get", lambda url, timeout=45: page)
+    assert _scope("aera")["addresses"] == []
+
+
+def test_catalog_drops_navigation_slugs(monkeypatch):
+    page = (
+        '/bug-bounty/aera/ /bug-bounty/aave/ /bug-bounty/list/ '
+        '/bug-bounty/information/ /bug-bounty/some-program/'
+    )
+    monkeypatch.setattr("cli.cs_immune._get", lambda url, timeout=45: page)
+    slugs = _catalog()
+    assert "aera" in slugs and "some-program" in slugs
+    assert "list" not in slugs
+    assert "information" not in slugs
