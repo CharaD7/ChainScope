@@ -43,6 +43,7 @@ from cli.cs_re import app as re_app
 from cli.cs_hacken import app as hacken_app
 from cli.cs_immune import app as immune_app
 from cli.cs_veck import app as veck_app
+from cli.cs_screen import app as screen_app
 from cli.cs_google import app as google_app
 from cli.cs_intigriti import app as intigriti_app
 from cli.cs_pays import app as pays_app
@@ -78,6 +79,7 @@ app.add_typer(re_app, name="re")
 app.add_typer(hacken_app, name="hacken")
 app.add_typer(immune_app, name="immune")
 app.add_typer(veck_app, name="veck")
+app.add_typer(screen_app, name="screen")
 app.add_typer(google_app, name="google")
 app.add_typer(intigriti_app, name="intigriti")
 app.add_typer(pays_app, name="pays")
