@@ -141,6 +141,38 @@ def _hackenproof_rows(top: int = 120) -> list[dict[str, typing.Any]]:
     return out
 
 
+def _bugcrowd_rows() -> list[dict[str, typing.Any]]:
+    """Bugcrowd: catalog only. No rep gate, fee, report count or audit field."""
+    try:
+        from cli import cs_bugcrowd as m
+        progs = m._load(refresh=False)
+    except Exception:
+        return []
+    out = []
+    for p in progs:
+        if not p.get("max_bounty"):
+            continue
+        out.append({
+            "platform": "bugcrowd",
+            "slug": p.get("slug"),
+            "project": p.get("project"),
+            "url": p.get("url"),
+            "ceiling": float(p.get("max_bounty") or 0),
+            "rep_req": p.get("rep_req"),
+            "reports": p.get("reports"),
+            "fee": p.get("fee"),
+            "poc": p.get("poc"),
+            "kyc": None,
+            "primacy_critical": None,
+            "audit_flag": p.get("audit_status") not in (None, "unknown"),
+            "audit_detail": p.get("reward_summary"),
+            "launched": None,
+            "updated": None,
+            "scope_rank": p.get("scope_rank"),
+        })
+    return out
+
+
 def _thin_hunt(reports: typing.Any, ceiling: float) -> float:
     """Reliable signal: few reports relative to ceiling = less attention.
 
@@ -185,6 +217,8 @@ def screen_rows(
         rows += _immunefi_rows()
     if platform in ("all", "hackenproof"):
         rows += _hackenproof_rows()
+    if platform in ("all", "bugcrowd"):
+        rows += _bugcrowd_rows()
 
     out: list[dict[str, typing.Any]] = []
     for r in rows:
@@ -200,10 +234,21 @@ def screen_rows(
         import math
 
         payout = min(1.0, math.log10(1.0 + r["ceiling"]) / 6.0)
-        score = round(0.55 * thin + 0.30 * payout + 0.15 * (1.0 if not r["audit_flag"] else 0.0), 3)
+        # Programs with no published report count cannot be ranked on thin-hunt,
+        # so give the neutral 0.5 and let payout/breadth decide. Inventing a thin
+        # signal is what misled this session five times.
+        breadth = 0.0
+        if r.get("scope_rank"):
+            breadth = 1.0 / max(1.0, float(r["scope_rank"]))
+        score = round(
+            0.40 * thin + 0.30 * payout + 0.15 * breadth
+            + 0.15 * (1.0 if not r["audit_flag"] else 0.0),
+            3,
+        )
         r["score"] = score
         r["thin_hunt"] = round(thin, 3)
         r["launch_year"] = year
+        r["scope_breadth"] = round(breadth, 3)
         r["audit_status"] = "unknown"  # never asserts "unaudited"
         out.append(r)
     out.sort(key=lambda x: x["score"], reverse=True)
@@ -212,7 +257,8 @@ def screen_rows(
 
 @app.command(name="run")
 def run(
-    platform: str = typer.Option("all", "--platform", help="all | immunefi | hackenproof"),
+    platform: str = typer.Option("all", "--platform",
+        help="all | immunefi | hackenproof | bugcrowd | intigriti | sherlock | google"),
     min_bounty: float = typer.Option(0, "--min-bounty", help="Min ceiling in USD"),
     rep_max: int = typer.Option(80, "--rep-max", help="Max reputation requirement"),
     require_free: bool = typer.Option(False, "--require-free", help="Only free-to-submit programs"),
