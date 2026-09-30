@@ -143,6 +143,14 @@ CLASSES: list[dict[str, typing.Any]] = [
         "strong": [
             r"balanceOf\([^)]*\)\s*-\s*\w+\s*(?!\s*//)",
         ],
+        # The real fee-on-transfer bug: measure the balance, then credit the
+        # NOMINAL argument instead of the measured delta. The two statements are
+        # adjacent in practice but Solidity formatting puts them on separate
+        # lines, so this cannot be matched line-by-line.
+        "multiline": [
+            r"=\s*\w+\.balanceOf\s*\([^)]*\)[\s\S]{0,400}?\w+\s*(?:\[[^\]]*\])?\s*\+=\s*"
+            r"(?:amount|amt|value|assets|shares|depositAmount|tokenAmount)\b",
+        ],
         "weak": [
             r"safeTransferFrom",
             r"transferFrom\s*\(",
@@ -210,7 +218,17 @@ CLASSES: list[dict[str, typing.Any]] = [
         "why": "A protocol prices collateral, rates or thresholds off an instantaneous pool value. A flash loan skews that value within one transaction, the protocol acts on it, the attacker unwinds and keeps the difference.",
         "look": "Pricing helpers that read live reserves/tick instead of a TWAP. Distinct from class 3: this is the *valuation* use, not a raw pool read.",
         "strong": [
-            r"function\s+\w*[Pp]rice\w*\s*\([^)]*\)[^{;]*\{\s*[^}]*(getReserves|slot0|observe|getSqrtRatioAtTick)",
+            # Intentionally empty. A bare `getReserves(`/`slot0(` is class 3's
+            # signal (a raw pool read); class 16 is specifically the *valuation*
+            # use - a price/collateral/threshold helper that reads a pool. Putting
+            # the pool-read pattern here made the two classes indistinguishable and
+            # fired on every AMM interface declaration.
+        ],
+        "multiline": [
+            r"function\s+\w*[Pp]rice\w*\s*\([^)]*\)[\s\S]{0,600}?"
+            r"\{\s*[\s\S]{0,400}?(getReserves|slot0|observe|getSqrtRatioAtTick)",
+            r"function\s+(?:get|compute|calc|calculate|price|value|collateral|threshold|oracle|quote)\w*\s*\([^)]*\)[\s\S]{0,600}?"
+            r"\{\s*[\s\S]{0,400}?(getReserves|slot0|observe|getSqrtRatioAtTick)",
         ],
         "weak": [
             r"twap|TWAP|timeWeightedAveragePrice",   # the MITIGATION - shows intent
@@ -319,7 +337,16 @@ def _strip(line: str) -> str:
 
 
 def scan(root: Path, class_ids: list[int] | None = None) -> list[dict[str, typing.Any]]:
-    """Return ranked hits: {class_id, class, strength, file, line, snippet}."""
+    """Return ranked hits: {class_id, class, strength, file, line, snippet}.
+
+    Two matching passes per file:
+      * `strong`/`weak` are matched per stripped source line.
+      * `multiline` patterns are matched against the whole comment-stripped file,
+        because some bugs are only visible as a *combination* that Solidity's
+        formatting reliably splits across lines (a `price()` helper whose body
+        reads `getReserves()` is essentially never written on one line).
+        A hit records the line where the match starts.
+    """
     hits: list[dict[str, typing.Any]] = []
     wanted = class_ids or [c["id"] for c in CLASSES]
     for f in _sol_files(root):
@@ -327,8 +354,29 @@ def scan(root: Path, class_ids: list[int] | None = None) -> list[dict[str, typin
             lines = f.read_text(errors="replace").splitlines()
         except OSError:
             continue
-        for i, line in enumerate(lines, 1):
-            code = _strip(line)
+        stripped = [_strip(ln) for ln in lines]
+        # Build the multi-line window while recording, for each retained line,
+        # the character offset at which it starts - so a regex match on the
+        # window can be mapped back to a real source line number.
+        window_parts: list[str] = []
+        offsets: list[tuple[int, int]] = []
+        cursor = 0
+        for n, s in enumerate(stripped, 1):
+            if not s.strip():
+                continue
+            offsets.append((cursor, n))
+            window_parts.append(s)
+            cursor += len(s) + 1
+        window = "\n".join(window_parts)
+
+        def line_at(pos: int) -> int:
+            lineno = offsets[0][1]
+            for start, n in offsets:
+                if start > pos:
+                    break
+                lineno = n
+            return lineno
+        for i, code in enumerate(stripped, 1):
             if not code.strip():
                 continue
             for cid in wanted:
@@ -345,6 +393,21 @@ def scan(root: Path, class_ids: list[int] | None = None) -> list[dict[str, typin
                                 "snippet": code.strip()[:160],
                             })
                             break
+        for cid in wanted:
+            cls = _BY_ID[cid]
+            for pat in cls.get("multiline", ()):
+                m = re.search(pat, window)
+                if not m:
+                    continue
+                hits.append({
+                    "class_id": cid,
+                    "class": cls["name"],
+                    "strength": "strong",
+                    "file": str(f.relative_to(root)) if root in f.parents else str(f),
+                    "line": line_at(m.start()),
+                    "snippet": m.group(0).strip().replace("\n", " ")[:160],
+                })
+                break
     # strong first, then fewer hits per class (rarer class = more signal)
     hits.sort(key=lambda h: (h["strength"] != "strong", h["class_id"]))
     return hits

@@ -203,7 +203,10 @@ def _program_block(raw: str, slug: str) -> dict[str, typing.Any] | None:
 
 def _catalog() -> list[str]:
     raw = _get(_INDEX, timeout=60)
-    slugs = set(re.findall(r"/bug-bounty/([a-z0-9][a-z0-9_-]{2,60})/", raw))
+    # Slugs are NOT lowercase-only: `1inch-SmartContracts` is a real program slug
+    # and was invisible while the class was [a-z0-9]. That silently dropped the
+    # largest 1inch program ($500k) from the catalog.
+    slugs = set(re.findall(r"/bug-bounty/([A-Za-z0-9][A-Za-z0-9_-]{2,60})/", raw))
     slugs -= {
         "list", "information", "scope", "resources", "submit-bug",
         "bug-bounty", "help", "learn", "sign-up", "sign-in",
@@ -241,7 +244,14 @@ def _load(refresh: bool = False) -> list[dict[str, typing.Any]]:
         return list(cached.values())
 
     slugs = _catalog()
+    # The index page is scraped by regex and is NOT a complete listing of every
+    # program (it paginates/lazy-loads), so `_catalog()` can legitimately return
+    # a SUBSET on any given fetch. Treat it as additive, never authoritative:
+    # union it with what we already hold, otherwise a partial fetch silently
+    # deletes every other program from the cache on write-back.
     if refresh and cached:
+        slugs = sorted(set(slugs) | set(cached))
+    else:
         slugs = sorted(set(slugs) | set(cached))
     out: list[dict[str, typing.Any]] = []
     missing = [s for s in slugs if refresh or s not in cached]
@@ -253,8 +263,12 @@ def _load(refresh: bool = False) -> list[dict[str, typing.Any]]:
         else:
             out.append(cached[slug])
     _CACHE.parent.mkdir(parents=True, exist_ok=True)
-    _CACHE.write_text(json.dumps({"version": _CACHE_VERSION, "fetched_at": int(time.time()), "programs": out}))
-    return out
+    # Preserve anything previously cached that we did not re-derive this pass.
+    keep = {p["_slug"]: p for p in out if isinstance(p, dict) and p.get("_slug")}
+    for slug, prog in cached.items():
+        keep.setdefault(slug, prog)
+    _CACHE.write_text(json.dumps({"version": _CACHE_VERSION, "fetched_at": int(time.time()), "programs": list(keep.values())}))
+    return list(keep.values())
 
 
 def _iso_epoch(value: typing.Any) -> float:
@@ -542,20 +556,21 @@ def list_programs(
     }[sort]
     rows.sort(key=keyf, reverse=True)
     rows = rows[: int(top)]
-    typer.echo(f"{len(rows)} program(s) match (max>={min_bounty:g}):")
-    for r in rows:
-        flags = []
-        if r["primacy_critical"] == "primacy_of_impact":
-            flags.append("IMPACT")
-        if r["poc"]:
-            flags.append("POC")
-        if r["kyc"]:
-            flags.append("KYC")
-        tag = ("[" + ",".join(flags) + "] ") if flags else ""
-        typer.echo(
-            f"  ${r['max_bounty']:>10,.0f}  audits={r['audits']:<3d} upd={r['updated_date']:<10} "
-            f"{tag}{r['project'] or r['slug']}  {r['url']}"
-        )
+    if not json_output:
+        typer.echo(f"{len(rows)} program(s) match (max>={min_bounty:g}):")
+        for r in rows:
+            flags = []
+            if r["primacy_critical"] == "primacy_of_impact":
+                flags.append("IMPACT")
+            if r["poc"]:
+                flags.append("POC")
+            if r["kyc"]:
+                flags.append("KYC")
+            tag = ("[" + ",".join(flags) + "] ") if flags else ""
+            typer.echo(
+                f"  ${r['max_bounty']:>10,.0f}  audits={r['audits']:<3d} upd={r['updated_date']:<10} "
+                f"{tag}{r['project'] or r['slug']}  {r['url']}"
+            )
     if json_output:
         typer.echo(json.dumps(rows, indent=2))
 
@@ -634,17 +649,18 @@ def keizo_rank(
     if not rows:
         typer.echo("No programs match the filters.", err=True)
         raise typer.Exit(1)
-    typer.echo(f"Keizo ranking (max>={min_bounty:g}):")
-    for r in rows:
-        s = r["signals"]
-        typer.echo(
-            f"  keizo={r['keizo']:.3f}  ${r['max_bounty']:>10,.0f}  audits={r['audits']:<3d} "
-            f"upd={r['updated_date']:<10} {r['project'] or r['slug']}"
-        )
-        typer.echo(
-            f"      fresh={s['fresh']:.2f} payout={s['payout']:.2f} unmined={s['unmined']:.2f} "
-            f"impact={s['primacy_impact']:.0f} poc={s['poc_required']:.0f}  {r['url']}"
-        )
+    if not json_output:
+            typer.echo(f"Keizo ranking (max>={min_bounty:g}):")
+            for r in rows:
+                s = r["signals"]
+                typer.echo(
+                    f"  keizo={r['keizo']:.3f}  ${r['max_bounty']:>10,.0f}  audits={r['audits']:<3d} "
+                    f"upd={r['updated_date']:<10} {r['project'] or r['slug']}"
+                )
+                typer.echo(
+                    f"      fresh={s['fresh']:.2f} payout={s['payout']:.2f} unmined={s['unmined']:.2f} "
+                    f"impact={s['primacy_impact']:.0f} poc={s['poc_required']:.0f}  {r['url']}"
+                )
     if json_output:
         typer.echo(json.dumps(rows, indent=2))
 
@@ -660,11 +676,12 @@ def show_scope(
     except RuntimeError as exc:
         typer.echo(f"scope fetch failed: {exc}", err=True)
         raise typer.Exit(1)
-    typer.echo(f"{slug}: {len(scope['addresses'])} in-scope address(es), {len(scope['repos'])} repo(s)")
-    for a in scope["addresses"]:
-        typer.echo(f"  {a['chain']:>28}:{a['address']}   ({a['host']})")
-    for r in scope["repos"]:
-        typer.echo(f"  repo: {r}")
+    if not json_output:
+            typer.echo(f"{slug}: {len(scope['addresses'])} in-scope address(es), {len(scope['repos'])} repo(s)")
+            for a in scope["addresses"]:
+                typer.echo(f"  {a['chain']:>28}:{a['address']}   ({a['host']})")
+            for r in scope["repos"]:
+                typer.echo(f"  repo: {r}")
     if json_output:
         typer.echo(json.dumps(scope, indent=2))
 

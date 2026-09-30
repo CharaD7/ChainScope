@@ -131,12 +131,13 @@ def list_programs(
         typer.echo("No programs match the filters.", err=True)
         raise typer.Exit(1)
         
-    typer.echo(f"{len(rows)} Intigriti program(s) match (max>={min_bounty:g}):")
-    for r in rows:
-        typer.echo(
-            f"  up to ${r['max_bounty']:>10,.0f}  {r['type']:>12s}  "
-            f"{r['title']}  {r['url']}"
-        )
+    if not json_output:
+            typer.echo(f"{len(rows)} Intigriti program(s) match (max>={min_bounty:g}):")
+            for r in rows:
+                typer.echo(
+                    f"  up to ${r['max_bounty']:>10,.0f}  {r['type']:>12s}  "
+                    f"{r['title']}  {r['url']}"
+                )
     if json_output:
         typer.echo(json.dumps(rows, indent=2))
 
@@ -179,14 +180,15 @@ def keizo_rank(
         typer.echo("No programs match the filters.", err=True)
         raise typer.Exit(1)
         
-    typer.echo(f"Keizo ranking (Intigriti, max>={min_bounty:g}):")
-    for r in rows:
-        s = r["signals"]
-        typer.echo(
-            f"  keizo={r['keizo']:.3f}  up to ${r['max_bounty']:>10,.0f}  "
-            f"{r['type']:>12s}  {r['title']}"
-        )
-        typer.echo(f"      fresh={s['fresh']:.2f} payout={s['payout']:.2f} open_gate={s['open_gate']:.0f}")
+    if not json_output:
+            typer.echo(f"Keizo ranking (Intigriti, max>={min_bounty:g}):")
+            for r in rows:
+                s = r["signals"]
+                typer.echo(
+                    f"  keizo={r['keizo']:.3f}  up to ${r['max_bounty']:>10,.0f}  "
+                    f"{r['type']:>12s}  {r['title']}"
+                )
+                typer.echo(f"      fresh={s['fresh']:.2f} payout={s['payout']:.2f} open_gate={s['open_gate']:.0f}")
     if json_output:
         typer.echo(json.dumps(rows, indent=2))
 

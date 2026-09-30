@@ -183,18 +183,19 @@ def list_programs(
     if not rows:
         typer.echo("No programs matched.", err=True)
         raise typer.Exit(1)
-    typer.echo(f"{len(rows)} Bugcrowd program(s):")
-    for p in rows:
-        rank = p["scope_rank"] or "?"
-        typer.echo(
-            f"  ${p['max_bounty']:>10,.0f}  rank={rank:<3} {str(p['access'] or ''):<6} "
-            f"{(p['project'] or '')[:44]}"
-        )
-    typer.echo(
-        "\n  ! Bugcrowd publishes no reputation gate, submission fee, report count or\n"
-        "     audit metadata publicly. audit_status is 'unknown' for every program -\n"
-        "     verify audit coverage by hand before reading code."
-    )
+    if not json_output:
+            typer.echo(f"{len(rows)} Bugcrowd program(s):")
+            for p in rows:
+                rank = p["scope_rank"] or "?"
+                typer.echo(
+                    f"  ${p['max_bounty']:>10,.0f}  rank={rank:<3} {str(p['access'] or ''):<6} "
+                    f"{(p['project'] or '')[:44]}"
+                )
+            typer.echo(
+                "\n  ! Bugcrowd publishes no reputation gate, submission fee, report count or\n"
+                "     audit metadata publicly. audit_status is 'unknown' for every program -\n"
+                "     verify audit coverage by hand before reading code."
+            )
     if json_output:
         typer.echo(json.dumps(rows, indent=2))
 
@@ -224,18 +225,19 @@ def keizo_rank(
     if not rows:
         typer.echo("No programs matched.", err=True)
         raise typer.Exit(1)
-    typer.echo(f"Keizo ranking (Bugcrowd, min=${min_bounty:,.0f}):")
-    for p in rows:
-        s = p["signals"]
-        typer.echo(
-            f"  keizo={p['keizo']:.3f}  ${p['max_bounty']:>10,.0f}  rank={p['scope_rank'] or '?'}  "
-            f"{p['project'][:40]}"
-        )
-        typer.echo(f"        payout={s['payout']:.2f} breadth={s['scope_breadth']:.2f}  {p['url']}")
-    typer.echo(
-        "\n  ! no thin-hunt signal exists on Bugcrowd (no report count), and no audit\n"
-        "     field exists. Verify coverage by hand - do not read code first."
-    )
+    if not json_output:
+            typer.echo(f"Keizo ranking (Bugcrowd, min=${min_bounty:,.0f}):")
+            for p in rows:
+                s = p["signals"]
+                typer.echo(
+                    f"  keizo={p['keizo']:.3f}  ${p['max_bounty']:>10,.0f}  rank={p['scope_rank'] or '?'}  "
+                    f"{p['project'][:40]}"
+                )
+                typer.echo(f"        payout={s['payout']:.2f} breadth={s['scope_breadth']:.2f}  {p['url']}")
+            typer.echo(
+                "\n  ! no thin-hunt signal exists on Bugcrowd (no report count), and no audit\n"
+                "     field exists. Verify coverage by hand - do not read code first."
+            )
     if json_output:
         typer.echo(json.dumps(rows, indent=2))
 
