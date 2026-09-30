@@ -204,6 +204,67 @@ CLASSES: list[dict[str, typing.Any]] = [
         "strong": [r"flashMint|_flashLoan"],
         "weak": [r"flash\s*loan|onFlashLoan"],
     },
+    {
+        "id": 16,
+        "name": "Flash-loan-assisted price / collateral manipulation",
+        "why": "A protocol prices collateral, rates or thresholds off an instantaneous pool value. A flash loan skews that value within one transaction, the protocol acts on it, the attacker unwinds and keeps the difference.",
+        "look": "Pricing helpers that read live reserves/tick instead of a TWAP. Distinct from class 3: this is the *valuation* use, not a raw pool read.",
+        "strong": [
+            r"function\s+\w*[Pp]rice\w*\s*\([^)]*\)[^{;]*\{\s*[^}]*(getReserves|slot0|observe|getSqrtRatioAtTick)",
+        ],
+        "weak": [
+            r"twap|TWAP|timeWeightedAveragePrice",   # the MITIGATION - shows intent
+            r"getAmountOut\s*\(",
+        ],
+    },
+    {
+        "id": 17,
+        "name": "Concentrated-liquidity position / pool math",
+        "why": "Uniswap V3/V4-style positions are valued by walking ticks and fee growth. Off-by-one tick ranges, wrong fee accounting, or mishandled sqrtPrice precision lets a position be over-valued, or value be extracted by a rebalancer.",
+        "look": "Asset managers and strategies that rebalance or compound concentrated-liquidity positions.",
+        "strong": [
+            r"sqrtPriceX96",
+            r"getSqrtRatioAtTick",
+            r"feeGrowthInside",
+            r"slot0\(\)\.tick|slot0\(\)[^;]*\btick\b",
+        ],
+        "weak": [
+            r"tickLower|tickUpper|positions\(",
+            r"TickMath|PositionInfo|CLPool|IClPool",
+            r"liquidity\(\)",
+        ],
+    },
+    {
+        "id": 18,
+        "name": "Swap slippage / sandwich / MEV",
+        "why": "A swap is routed without a binding minimum-out or deadline, or a user-facing quote is computed off-manifold. An attacker sandwiches the transaction and extracts the difference from the user.",
+        "look": "Routers, zappers, swap-periphery, and any user-facing quote the protocol then trusts.",
+        "strong": [
+            r"swapExactTokensFor(Token|ETH)SupportingFeeOnTransferTokens",
+            r"amountOutMin(imum)?\s*=\s*0\b",
+            r"getAmountOut\s*\([^)]*reserve",
+        ],
+        "weak": [
+            r"deadline",
+            r"amountOutMinimum|minAmountOut|minimumOut",
+            r"\bswap\b|SwapRouter|amountOut\b",
+        ],
+    },
+    {
+        "id": 19,
+        "name": "Vault donation / first-depositor inflation",
+        "why": "An empty or first-depositor vault mints a trivially small share balance. A donation inflates totalAssets, later deposits round down to 0 shares, and the first depositor withdraws everyone's money.",
+        "look": "ERC-4626 vaults, share/reward tokens with a raw totalSupply division. Distinct from class 4: that is generic rounding; this is the donation inflation attack specifically.",
+        "strong": [
+            r"convertToShares\s*\([^)]*\+\s*1",
+            r"virtualShares|virtualAssets|VIRTUAL_SHARES",
+        ],
+        "weak": [
+            r"totalSupply\s*\(\s*\)\s*==\s*0",     # first-depositor guard = the MITIGATION
+            r"previewMint|previewDeposit",
+            r"donat|\bskim\b",
+        ],
+    },
 ]
 
 _BY_ID = {c["id"]: c for c in CLASSES}

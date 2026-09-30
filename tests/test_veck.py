@@ -48,10 +48,12 @@ def tree(tmp_path: Path) -> Path:
 
 
 def test_class_table_is_complete_and_unique():
-    assert len(CLASSES) == 15
+    # 19 classes: 15 generic web3 + 4 DeFi-specific added 2026-09-30
+    # (flash-loan manipulation, CLMM pool math, swap slippage/MEV, vault donation).
+    assert len(CLASSES) == 19
     ids = [c["id"] for c in CLASSES]
-    assert ids == list(range(1, 16))
-    assert len(set(ids)) == 15
+    assert ids == list(range(1, 20))
+    assert len(set(ids)) == 19
     for c in CLASSES:
         assert c["name"] and c["why"] and c["look"]
         assert "strong" in c and "weak" in c
