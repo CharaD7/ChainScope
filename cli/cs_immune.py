@@ -451,7 +451,7 @@ def list_programs(
     rows = [_row(p) for p in programs]
     rows = [r for r in rows if r["max_bounty"] >= min_bounty]
     if only_impact:
-        rows = [r for r in rows if r["primacy"] == "primacy_of_impact"]
+        rows = [r for r in rows if r["primacy_critical"] == "primacy_of_impact"]
     if no_audits:
         rows = [r for r in rows if not r["audits"]]
     if fresh_scope:
@@ -470,7 +470,7 @@ def list_programs(
     typer.echo(f"{len(rows)} program(s) match (max>={min_bounty:g}):")
     for r in rows:
         flags = []
-        if r["primacy"] == "primacy_of_impact":
+        if r["primacy_critical"] == "primacy_of_impact":
             flags.append("IMPACT")
         if r["poc"]:
             flags.append("POC")
@@ -501,7 +501,7 @@ def _keizo(p: dict[str, typing.Any], now: float) -> dict[str, typing.Any]:
     payout = min(1.0, math.log10(1.0 + row["max_bounty"]) / 6.0)
     # More audits => more of the surface is documented => less likely novel.
     dedup_load = min(1.0, row["audits"] / 6.0)
-    impact = 1.0 if row["primacy"] == "primacy_of_impact" else 0.0
+    impact = 1.0 if row["primacy_critical"] == "primacy_of_impact" else 0.0
     poc = 1.0 if row["poc"] else 0.0
     score = round(
         0.30 * fresh + 0.25 * payout + 0.20 * (1.0 - dedup_load) + 0.15 * impact + 0.10 * poc,
@@ -533,7 +533,7 @@ def keizo_rank(
     rows = [_keizo(p, now) for p in programs]
     rows = [r for r in rows if r["max_bounty"] >= min_bounty]
     if only_impact:
-        rows = [r for r in rows if r["primacy"] == "primacy_of_impact"]
+        rows = [r for r in rows if r["primacy_critical"] == "primacy_of_impact"]
     if no_audits:
         rows = [r for r in rows if not r["audits"]]
     rows.sort(key=lambda r: r["keizo"], reverse=True)
