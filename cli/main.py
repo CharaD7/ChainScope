@@ -49,6 +49,7 @@ from cli.cs_google import app as google_app
 from cli.cs_intigriti import app as intigriti_app
 from cli.cs_pays import app as pays_app
 from cli.cs_sherlock import app as sherlock_app
+from cli.cs_gate import app as gate_app
 from core.cs_discover import app as discover_app
 
 app = typer.Typer()
@@ -87,6 +88,7 @@ app.add_typer(google_app, name="google")
 app.add_typer(intigriti_app, name="intigriti")
 app.add_typer(pays_app, name="pays")
 app.add_typer(sherlock_app, name="sherlock")
+app.add_typer(gate_app, name="gate")
 app.add_typer(discover_app, name="discover")
 
 if __name__ == "__main__":
