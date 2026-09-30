@@ -265,6 +265,44 @@ CLASSES: list[dict[str, typing.Any]] = [
             r"donat|\bskim\b",
         ],
     },
+    {
+        "id": 20,
+        "name": "ERC-4337 paymaster gas-accounting / deposit drain",
+        "why": "The paymaster holds an ETH deposit at the EntryPoint and sponsors gas. If any UserOperation field that affects cost is not covered by the signed commitment - or a cap the whitelisted path ignores - one sponsored operation can drain the entire deposit.",
+        "look": "Gasless/sponsored-transaction paymasters and relayers. PROVEN FERTILE: the ADI Chain GaslessPaymaster was audited by Hacken in Feb 2026 and still yielded a Critical (unsigned preVerificationGas in the commitment hash, full deposit drain) plus two Highs, all fixed.",
+        "strong": [
+            r"validatePaymasterUserOp",
+            r"_validatePaymasterUserOp",
+            r"postOp\b",
+            r"paymasterAndData",
+            r"preVerificationGas",
+            r"EntryPoint",
+        ],
+        "weak": [
+            r"BasePaymaster|IPaymaster",
+            r"verifyingSigner|VERIFIER_ROLE",
+        ],
+    },
+    {
+        "id": 21,
+        "name": "Modular account execution (ERC-7579 / account abstraction)",
+        "why": "An account is modules, not one contract. A validate/execute split that lets a module, guardian or executor act outside the owner's intent bypasses the account's own authorisation; an unguarded executeBatch or executeFromExecutor drains everything the account holds.",
+        "look": "Smart accounts, registrars, module installation, session keys. Systematically younger than the token code these accounts hold, which is why they surface the ADI-class bug.",
+        "strong": [
+            r"executeFromExecutor",
+            r"executeFromModule",
+            r"installModule",
+            r"uninstallModule",
+            r"supportsModule",
+            r"ERC7579|ERC-7579|IERC7579",
+        ],
+        "weak": [
+            r"executeBatch",
+            r"__validate__|__validate_deploy__",
+            r"getGuardian|addGuardian|removeGuardian",
+            r"sessionKey|SessionKey",
+        ],
+    },
 ]
 
 _BY_ID = {c["id"]: c for c in CLASSES}

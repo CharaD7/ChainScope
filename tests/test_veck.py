@@ -48,12 +48,14 @@ def tree(tmp_path: Path) -> Path:
 
 
 def test_class_table_is_complete_and_unique():
-    # 19 classes: 15 generic web3 + 4 DeFi-specific added 2026-09-30
-    # (flash-loan manipulation, CLMM pool math, swap slippage/MEV, vault donation).
-    assert len(CLASSES) == 19
+    # 21 classes: 15 generic web3 + 4 DeFi-specific + 2 account-abstraction,
+    # all added 2026-09-30: flash-loan manipulation, CLMM pool math, swap
+    # slippage/MEV, vault donation, ERC-4337 paymaster deposit drain,
+    # ERC-7579 modular account execution.
+    assert len(CLASSES) == 21
     ids = [c["id"] for c in CLASSES]
-    assert ids == list(range(1, 20))
-    assert len(set(ids)) == 19
+    assert ids == list(range(1, 22))
+    assert len(set(ids)) == 21
     for c in CLASSES:
         assert c["name"] and c["why"] and c["look"]
         assert "strong" in c and "weak" in c
@@ -113,3 +115,49 @@ def test_strong_ranks_before_weak(tree: Path):
     strengths = [h["strength"] for h in hits]
     # strong first, then weak
     assert strengths == sorted(strengths, key=lambda s: s != "strong")
+
+
+# --- account-abstraction classes (added 2026-09-30) -------------------------
+# Motivated by a concrete precedent: Hacken audited the ADI Chain GaslessPaymaster
+# in Feb 2026 and still found a Critical (unsigned preVerificationGas in the
+# commitment hash -> full deposit drain). Program-level "has audits" is therefore
+# a poor signal; the class itself is fertile.
+
+_AA_SAMPLE = """
+pragma solidity ^0.8.24;
+contract P {
+    function _validatePaymasterUserOp(bytes32, bytes calldata paymasterAndData, uint256) internal {}
+    function postOp(PostOpMode, bytes calldata context, uint256 actualGasCost, uint256) external {}
+    function installModule(uint256 typeId, address module, bytes calldata data) external {}
+    function executeFromExecutor(address target, uint256 value, bytes calldata data) external {}
+    function executeBatch(address[] calldata t, uint256[] calldata v) external {}
+}
+"""
+
+
+def test_class_table_now_covers_account_abstraction():
+    assert len(CLASSES) == 21
+    assert [c["id"] for c in CLASSES] == list(range(1, 22))
+    ids = {c["id"] for c in CLASSES}
+    assert 20 in ids and 21 in ids
+
+
+def test_4337_paymaster_patterns_detected(tmp_path):
+    f = tmp_path / "Paymaster.sol"
+    f.write_text(_AA_SAMPLE)
+    hits = scan(tmp_path)
+    assert 20 in {h["class_id"] for h in hits}
+
+
+def test_7579_module_patterns_detected(tmp_path):
+    f = tmp_path / "Account.sol"
+    f.write_text(_AA_SAMPLE)
+    hits = scan(tmp_path)
+    assert 21 in {h["class_id"] for h in hits}
+
+
+def test_plain_contract_does_not_trigger_aa_classes(tmp_path):
+    f = tmp_path / "Plain.sol"
+    f.write_text("contract C { function transfer(address a, uint256 v) external {} }")
+    hits = scan(tmp_path)
+    assert not ({20, 21} & {h["class_id"] for h in hits})
