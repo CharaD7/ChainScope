@@ -27,6 +27,8 @@ from core.cs_econ import (  # noqa: E402
     erc4626_naive,
     erc4626_virtual,
     donation_attack,
+    rounding_drift,
+    sandwich_profit_at_size,
 )
 from core.cs_econ import (  # noqa: E402
     _assets_naive as _assets_naive,
@@ -68,9 +70,85 @@ def run_forge() -> str:
     return proc.stdout
 
 
+_DRIFT = re.compile(r"DRIFT\s+(\S+)\s+(\S+)\s*:\s*(-?\d+)")
+_SAND = re.compile(r"SANDWICH\s+(\S+)\s+(\S+)\s*:\s*(-?\d+)")
+
+
+def _check_rounding(out: str) -> list[str]:
+    """rounding_drift vs a Solidity vault whose redemption floors to zero.
+
+    Seeded at 1e22 assets / 1e24 supply rather than 1:1, because at assets ==
+    supply every division is exact and both sides report zero drift for reasons
+    that have nothing to do with the maths.
+    """
+    bad: list[str] = []
+    rows = {(t, f): int(v) for t, f, v in _DRIFT.findall(out)}
+    if ("asym", "total_assets") not in rows:
+        return ["rounding: no DRIFT output captured from forge"]
+    assets, recovered, paid = (rows[("asym", "total_assets")],
+                               rows[("asym", "recovered")],
+                               rows[("asym", "paid")])
+    exp_assets = 10 ** 22 + paid
+
+    d = rounding_drift(
+        lambda a, s, x: x, lambda a, s, sh: 0,
+        cycles=paid, amount=1, initial_assets=10 ** 22, initial_supply=10 ** 24,
+    )
+    checks = [
+        ("total_assets", assets, exp_assets),
+        ("recovered", recovered, d["recovered"]),
+        ("attacker_net", recovered - paid, d["attacker_net"]),
+        ("vault_gain", assets - 10 ** 22, d["vault_gain"]),
+    ]
+    for name, evm, model in checks:
+        ok = evm == model
+        print(f"{'rounding':<13}{name:<15}{evm:>22,}{model:>22,}  {'ok' if ok else 'MISMATCH'}")
+        if not ok:
+            bad.append(f"rounding.{name}: evm={evm} model={model}")
+    return bad
+
+
+def _check_sandwich(out: str) -> list[str]:
+    """Sandwich accounting vs EVM at a FIXED attacker size.
+
+    Not the optimiser's choice of size: the model searches continuous sizes in
+    floating point and the chain executes one discrete trade, so comparing those
+    proves nothing. This validates the accounting, including the flipped reserve
+    order on the exit leg, which has been wrong twice.
+    """
+    bad: list[str] = []
+    rows: dict[str, dict[str, int]] = {}
+    for tag, field, val in _SAND.findall(out):
+        rows.setdefault(tag, {})[field] = int(val)
+    if "fee0" not in rows or "fee30" not in rows:
+        return ["sandwich: no SANDWICH output captured from forge"]
+
+    for tag, fee in (("fee0", 0), ("fee30", 30)):
+        got = rows[tag]
+        m = sandwich_profit_at_size(
+            reserve_in=100 * W, reserve_out=100 * W,
+            victim_amount_in=10 * W, attacker_in=5 * W, fee_bps=fee,
+        )
+        # forge labels the exit leg "proceeds"; the model calls it attacker_proceeds
+        for field, key in (("victim_out", "victim_out"),
+                           ("proceeds", "attacker_proceeds"),
+                           ("profit", "attacker_profit"),
+                           ("victim_at_spot", "victim_out_at_spot")):
+            if field not in got:
+                bad.append(f"sandwich[{tag}].{field}: missing from forge output")
+                continue
+            ok = got[field] == m[key]
+            print(f"{'sandwich_' + tag:<13}{field:<15}{got[field]:>22,}{m[key]:>22,}  "
+                  f"{'ok' if ok else 'MISMATCH'}")
+            if not ok:
+                bad.append(f"sandwich[{tag}].{field}: evm={got[field]} model={m[key]}")
+    return bad
+
+
 def main() -> int:
     observed = {label: {} for label in CASES}
-    for label, field, value in _LINE.findall(run_forge()):
+    out = run_forge()
+    for label, field, value in _LINE.findall(out):
         if label in observed and field in FIELDS:
             observed[label][field] = int(value)
 
@@ -96,6 +174,8 @@ def main() -> int:
             if not ok:
                 failures.append(f"{label}.{field}: evm={evm_value} model={model_value}")
 
+    failures.extend(_check_rounding(out))
+    failures.extend(_check_sandwich(out))
     print()
     if failures:
         print(f"{len(failures)} mismatch(es) between core/cs_econ.py and EVM execution:")

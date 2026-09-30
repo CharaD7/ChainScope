@@ -155,3 +155,78 @@ contract MockToken {
         return true;
     }
 }
+/// @notice Vault whose redemption rounds to ZERO, so every deposit/redeem cycle
+///         leaves the depositor behind. Deliberately broken - it exists to prove
+///         `rounding_drift` can tell a leaking vault from a correct one, which a
+///         well-behaved fixture cannot (a correct vault drifts by exactly zero).
+contract AsymVault {
+    address public immutable asset;
+    uint256 public totalAssets;
+    uint256 public totalSupply;
+
+    constructor(address asset_) {
+        asset = asset_;
+    }
+
+    function convertToShares(uint256 assets) public view returns (uint256) {
+        if (totalSupply == 0) return assets;
+        return assets * totalSupply / totalAssets;
+    }
+
+    /// BUG: floors the redemption to zero, so the redeemer is credited nothing.
+    function convertToAssets(uint256 shares) public pure returns (uint256) {
+        shares;
+        return 0;
+    }
+
+    function deposit(uint256 assets) external returns (uint256 shares) {
+        shares = convertToShares(assets);
+        totalAssets += assets;
+        totalSupply += shares;
+        IERC20Like(asset).transferFrom(msg.sender, address(this), assets);
+    }
+
+    function redeem(uint256 shares) external returns (uint256 assets) {
+        assets = convertToAssets(shares);
+        totalAssets -= assets;
+        totalSupply -= shares;
+    }
+
+    function seed(uint256 assets, uint256 supply) external {
+        totalAssets = assets;
+        totalSupply = supply;
+    }
+}
+
+/// @notice Constant-product pool used to bind the sandwich model to execution.
+///         Deliberately minimal: fee on the input leg, exact integer maths, no
+///         protocol fees or callbacks, so the numbers are comparable directly.
+contract CPMM {
+    uint256 public reserveIn;
+    uint256 public reserveOut;
+    uint256 public feeBps;
+
+    constructor(uint256 rIn, uint256 rOut, uint256 fee) {
+        reserveIn = rIn;
+        reserveOut = rOut;
+        feeBps = fee;
+    }
+
+    function amountOut(uint256 xIn) public view returns (uint256) {
+        uint256 xi = (xIn * (10_000 - feeBps)) / 10_000;
+        if (reserveIn + xi == 0) return 0;
+        return (xi * reserveOut) / (reserveIn + xi);
+    }
+
+    /// Swap `xIn` of the input token in, returning the output amount.
+    function swap(uint256 xIn) external returns (uint256 out) {
+        out = amountOut(xIn);
+        reserveIn += xIn;
+        reserveOut -= out;
+    }
+
+    function sync(uint256 newIn, uint256 newOut) external {
+        reserveIn = newIn;
+        reserveOut = newOut;
+    }
+}

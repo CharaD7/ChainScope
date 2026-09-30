@@ -470,6 +470,70 @@ def sandwich_profit_constant_product(
     }
 
 
+def amm_out_exact(x_in: int, r_in: int, r_out: int, fee_bps: int = 0) -> int:
+    """Exact integer constant-product quote, matching the Foundry `CPMM` fixture.
+
+    The floating-point `amm_out` inside the optimiser cannot be compared against
+    EVM execution: the model searches continuous sizes and the chain executes one
+    discrete integer trade. Binding therefore prices a FIXED size in integer
+    arithmetic, so what is validated is the accounting rather than the search.
+    """
+    if x_in <= 0:
+        return 0
+    xi = x_in * (10_000 - fee_bps) // 10_000
+    denom = r_in + xi
+    if denom == 0:
+        return 0
+    return xi * r_out // denom
+
+
+def sandwich_profit_at_size(
+    *,
+    reserve_in: int,
+    reserve_out: int,
+    victim_amount_in: int,
+    attacker_in: int,
+    fee_bps: int = 0,
+    attacker_gas: int = 0,
+    min_out_ratio: float = 0.0,
+) -> dict[str, t.Any]:
+    """Price one specific sandwich size in exact integers.
+
+    Mirrors `sandwich_profit_constant_product`'s accounting (including the flipped
+    reserve order on the exit leg) but at a caller-chosen size, so a model
+    prediction and a fork execution are comparable field for field.
+    """
+    spot = amm_out_exact(victim_amount_in, reserve_in, reserve_out, fee_bps)
+    floor = int(spot * min_out_ratio)
+
+    attacker_got = amm_out_exact(attacker_in, reserve_in, reserve_out, fee_bps)
+    r_in_1 = reserve_in + attacker_in
+    r_out_1 = reserve_out - attacker_got
+    victim_out = amm_out_exact(victim_amount_in, r_in_1, r_out_1, fee_bps)
+
+    feasible = victim_out >= floor or victim_out == 0 and floor == 0
+
+    r_in_2 = r_in_1 + victim_amount_in
+    r_out_2 = r_out_1 - victim_out
+    # exit leg: the attacker sells the OUTPUT token, so its holding is the input
+    # against the pool's out-side reserve
+    denom = r_out_2 + attacker_got
+    proceeds = 0 if denom == 0 else attacker_got * r_in_2 // denom
+    profit = proceeds - attacker_in - attacker_gas
+
+    return {
+        "attacker_in": attacker_in,
+        "attacker_got": attacker_got,
+        "attacker_proceeds": proceeds,
+        "attacker_profit": profit,
+        "victim_out": victim_out,
+        "victim_out_at_spot": spot,
+        "victim_floor": floor,
+        "feasible": feasible,
+        "value_extracted_from_victim": spot - victim_out,
+    }
+
+
 def sandwich_sensitivity(
     *,
     reserve_in: float,

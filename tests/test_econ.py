@@ -23,6 +23,8 @@ import pytest
 
 from core.cs_econ import (
     ASSET_MODELS,
+    amm_out_exact,
+    sandwich_profit_at_size,
     SHARE_MODELS,
     donation_attack,
     erc4626_dead_shares,
@@ -264,3 +266,58 @@ def test_invalid_bound_is_rejected():
     with pytest.raises(ValueError):
         sandwich_profit_constant_product(reserve_in=W, reserve_out=W, victim_amount_in=W,
                                         min_out_ratio=1.5)
+
+# --------------------------------------------------------------------------- #
+# exact-integer helpers (the ones that can be compared against the EVM)
+# --------------------------------------------------------------------------- #
+
+
+def test_amm_out_exact_is_integer_math():
+    assert amm_out_exact(1000, 10_000, 10_000) == 1000 * 10000 // 11000
+    # a fee reduces the input leg before it reaches the curve
+    assert amm_out_exact(10_000, 100_000, 100_000, fee_bps=30) < amm_out_exact(
+        10_000, 100_000, 100_000, fee_bps=0
+    )
+
+
+def test_sandwich_at_size_matches_the_brute_force_value():
+    """Pinned against the EVM: 5 W front-run on a 100/100 pool, 10 W victim."""
+    r = sandwich_profit_at_size(reserve_in=100 * W, reserve_out=100 * W,
+                                victim_amount_in=10 * W, attacker_in=5 * W, fee_bps=0)
+    assert r["victim_out"] == 8_281_573_498_964_803_312
+    assert r["attacker_proceeds"] == 5_970_654_627_539_503_385
+    assert r["attacker_profit"] == 970_654_627_539_503_385
+    assert r["victim_out_at_spot"] == 9_090_909_090_909_090_909
+
+
+def test_sandwich_at_size_with_fee():
+    """Pinned against the EVM with a 30 bps pool fee on both legs."""
+    r = sandwich_profit_at_size(reserve_in=100 * W, reserve_out=100 * W,
+                                victim_amount_in=10 * W, attacker_in=5 * W, fee_bps=30)
+    assert r["victim_out"] == 8_260_063_278_795_499_180
+    assert r["attacker_profit"] == 952_197_240_752_835_504
+
+
+def test_sandwich_at_size_victim_always_gets_worse():
+    """Front-running must never improve the victim's fill."""
+    r = sandwich_profit_at_size(reserve_in=100 * W, reserve_out=100 * W,
+                                victim_amount_in=10 * W, attacker_in=5 * W)
+    assert r["victim_out"] < r["victim_out_at_spot"]
+    assert r["value_extracted_from_victim"] > 0
+
+
+def test_rounding_drift_against_a_leaking_vault():
+    """Pinned against AsymVault in the Foundry harness.
+
+    Seeded skewed (1e22 assets / 1e24 supply) rather than 1:1, because at
+    assets == supply every division is exact and both sides report zero drift for
+    reasons unrelated to the maths.
+    """
+    d = rounding_drift(lambda a, s, x: x, lambda a, s, sh: 0,
+                       cycles=100, amount=1,
+                       initial_assets=10 ** 22, initial_supply=10 ** 24)
+    assert d["recovered"] == 0
+    assert d["attacker_net"] == -100
+    assert d["vault_gain"] == 100
+    assert d["conservation_holds"] is True
+    assert d["total_assets"] == 10 ** 22 + 100
