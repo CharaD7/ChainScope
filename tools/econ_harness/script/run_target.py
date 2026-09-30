@@ -64,6 +64,12 @@ def latest_block(rpc: str) -> int:
     return int(out.stdout.strip())
 
 
+def _rpc(chain: str) -> str | None:
+    from core.cs_rpc import rpc_for
+
+    return rpc_for(str(chain))
+
+
 def verify_source(addr: str) -> str:
     """Report Sourcify verification status. Absence is not a verdict, only a fact."""
     try:
@@ -125,22 +131,65 @@ def verdict(parsed: dict[str, object]) -> str:
             f"victim lost {ints.get('victim_loss', 0):,}")
 
 
+def check_asset(chain: str, addr: str, override: str) -> str:
+    """Resolve the underlying, and say plainly when the vault declares none.
+
+    A vault whose `asset()` returns the zero address is the wstETH/rebasing
+    pattern: the real underlying is implied rather than stored. `deal()` on the
+    zero address fails, so without this check the run just reports INCONCLUSIVE
+    and looks like a tooling problem instead of a property of the target.
+    """
+    if override:
+        return override
+    url = _rpc(chain)
+    if not url:
+        return ""
+    try:
+        p = subprocess.run(
+            ["cast", "call", addr, "asset()(address)", "--rpc-url", url],
+            capture_output=True, text=True, timeout=90, env=_env(),
+        )
+    except Exception:  # noqa: BLE001
+        return ""
+    val = p.stdout.strip()
+    # rc==0 with empty output still means unresolvable: a real asset() returns
+    # 32 bytes, so silence is not a usable address
+    if p.returncode != 0 or not val:
+        return "__ZERO_ASSET__"
+    if int(val, 16) == 0:
+        return "__ZERO_ASSET__"
+    return val
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--vault", required=True)
     ap.add_argument("--asset", default="")
+    ap.add_argument("--chain", default="1")
     ap.add_argument("--block", type=int, default=0)
     ap.add_argument("--rpc", default=DEFAULT_RPC)
     args = ap.parse_args()
 
+    asset = check_asset(args.chain, args.vault, args.asset)
+    if asset == "__ZERO_ASSET__":
+        print(f"target      : {args.vault}")
+        print("asset       : asset() == address(0)")
+        print()
+        print("CANNOT BIND: this vault declares no underlying, the rebasing-implied")
+        print("pattern used by wstETH and similar. Seed balances via the underlying")
+        print("directly and pass --asset; the probe cannot resolve it from the vault.")
+        return 3
+    if not asset:
+        print("WARNING: could not read asset(); falling back to vault.asset() in the fork")
+
     block = args.block or latest_block(args.rpc)
     print(f"target      : {args.vault}")
-    print(f"asset       : {args.asset or '(from vault.asset())'}")
+    print(f"asset       : {asset or '(from vault.asset())'}")
     print(f"fork block  : {block}")
     print(f"source      : {verify_source(args.vault)}")
     print("-" * 72)
 
-    out = run_fork(args.vault, args.asset, block, args.rpc)
+    out = run_fork(args.vault, asset, block, args.rpc)
     parsed = parse(out)
     if not parsed["prereqs"]:
         print("prerequisite view calls did not report; see raw output below\n")

@@ -24,3 +24,8 @@ graph.db
 
 # local secrets (contains Bird key - never commit)
 run_watch.sh
+
+# local secrets - never commit (RPC keys, API tokens)
+.env
+.env.*
+!.env.example
