@@ -219,15 +219,30 @@ def test_tiers_prefers_later_list_over_legacy():
     assert t["Critical"]["payout"] == 250_000
 
 
-def test_row_ceiling_prefers_critical_over_maxbounty():
+def test_row_ceiling_is_maxbounty_not_stale_tier_array():
+    # Regression (2026-09-30): Celer's payload carries a stale
+    # `smartcontract_rewards` array claiming 2,000,000 while the live program
+    # page says Critical = 200,000, which is what maxBounty reports. Trusting
+    # the tier array over-reported the ceiling 10x and mis-ranked the target.
     from cli.cs_immune import _row
     row = _row({
         "_slug": "x", "maxBounty": 200_000, "primacy": "primacy_of_rules",
         "audits": [], "knownIssues": "[]", "updatedDate": "2026-09-09T00:00:00.000Z",
-        "_seg": '{"level":"Critical","payout":"Up to USD $2,000,000"}',
+        "_seg": '"smartcontract_rewards":[{"level":"Critical","payout":"Up to USD $2,000,000"}]',
     })
-    assert row["critical_payout"] == 2_000_000
-    assert row["max_bounty"] == 2_000_000   # ceiling, not the stale maxBounty
+    assert row["max_bounty"] == 200_000        # authoritative field wins
+    assert row["critical_payout_stale"] is True # implausible tier claim rejected
+
+
+def test_row_keeps_plausible_tier_claim():
+    from cli.cs_immune import _row
+    row = _row({
+        "_slug": "x", "maxBounty": 100_000, "primacy": "primacy_of_rules",
+        "audits": [], "knownIssues": "[]", "updatedDate": "2026-09-09T00:00:00.000Z",
+        "_seg": '{"level":"Critical","payout":"Up to USD $250,000"}',
+    })
+    assert row["max_bounty"] == 100_000
+    assert row["critical_payout"] == 250_000   # within 4x, kept as cross-check
 
 
 def test_row_exposes_per_tier_primacy():

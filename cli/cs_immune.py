@@ -348,8 +348,16 @@ def _row(p: dict[str, typing.Any]) -> dict[str, typing.Any]:
     tiers = _tiers(seg) if seg else {}
     critical = tiers.get("Critical", {})
     high = tiers.get("High", {})
-    # Ceiling = the Critical tier when published, else maxBounty.
-    ceiling = critical.get("payout") or float(p.get("maxBounty") or 0)
+    # maxBounty is the AUTHORITATIVE ceiling. The payload also carries stale
+    # `legacy` / `smartcontract_rewards` / `web_rewards` arrays whose values
+    # disagree with the live program page (Celer: maxBounty=200,000 but
+    # smartcontract_rewards claims 2,000,000). Prefer maxBounty; report tier
+    # values as cross-checks only, never as a ceiling.
+    ceiling = float(p.get("maxBounty") or 0)
+    claimed = critical.get("payout")
+    if claimed and claimed > ceiling * 4:
+        # implausible vs the authoritative field - treat as stale, do not use
+        claimed = None
     return {
         "slug": p.get("_slug") or p.get("slug"),
         "project": p.get("project"),
@@ -357,6 +365,7 @@ def _row(p: dict[str, typing.Any]) -> dict[str, typing.Any]:
         "max_bounty": ceiling,
         "tiers": tiers,
         "critical_payout": critical.get("payout"),
+        "critical_payout_stale": bool(claimed is None and critical.get("payout")),
         "high_payout": high.get("payout"),
         "updated": updated,
         "updated_date": (p.get("updatedDate") or "")[:10],
