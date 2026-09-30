@@ -23,6 +23,16 @@ assumption it rests on.
 The discrimination test is the point: `donation_attack` must report profit for a
 vault with an empty-vault branch and no profit for one with virtual shares. If it
 cannot tell those apart it is decoration, not a check.
+
+**Scope: these models describe an EMPTY vault.** `donation_attack` starts from the
+attacker's seed as the only supply, which is the regime where inflation bites.
+`tools/econ_harness` exists because that assumption is itself worth testing, and
+running it against a live vault showed what it hides: Sky's sDAI holds ~164k DAI
+across 1.39M shares, so at a 1-wei seed the attacker still receives 846,617,106
+shares against a 1-wei loss and the attack is worth about -100 DAI. Viability
+turns on the attacker being able to hold a dominant fraction of total supply, not
+on their absolute deposit. For a seeded vault, read the fork numbers - they are
+the answer - and treat any model prediction as a bound.
 """
 from __future__ import annotations
 
