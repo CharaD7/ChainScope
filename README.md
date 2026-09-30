@@ -784,6 +784,11 @@ Start with [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## Roadmap
 
+**Platform coverage is tracked in [PLATFORM_TODOS.md](./PLATFORM_TODOS.md)** —
+missing/partial modules for Sherlock, Intigriti, Bugcrowd, CertiK and YesWeHack,
+plus the shared obligations each one must meet (notably: never treat an
+`audits` field as coverage evidence).
+
 Near-term expansion areas:
 - richer protocol semantics for roles, upgrades, assets, and config surfaces
 - broader parser-grade support for additional blockchain ecosystems
