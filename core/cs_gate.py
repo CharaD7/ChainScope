@@ -60,8 +60,8 @@ _DATE_SPELLED = re.compile(
 )
 
 
-def find_audits(repo: Path) -> list[dict[str, _t.Any]]:
-    """Locate audit reports committed to the repository.
+def find_audits(repo: Path, extra_dirs: list[Path] | None = None) -> list[dict[str, _t.Any]]:
+    """Locate audit reports for a repository.
 
     Directory membership is the primary signal - a PDF under `audits/` is an
     audit artefact regardless of how it is named. Filename parsing then enriches
@@ -72,35 +72,46 @@ def find_audits(repo: Path) -> list[dict[str, _t.Any]]:
     the file, so an undated report is never silently dropped: dropping it would
     move the audit baseline backwards and invent a "new code" delta that does not
     exist.
+
+    `extra_dirs` covers the common case where the reports are kept in a separate
+    corpus repository rather than beside the code - 1inch keeps every report for
+    cross-chain-swap, fusion-protocol and limit-order-protocol in a single
+    `1inch-audits` repo, so none of them has a baseline on its own.
     """
+    roots = [(repo, repo)] + [(d, d) for d in (extra_dirs or [])]
     found: list[dict[str, _t.Any]] = []
-    for path in repo.rglob("*"):
-        if not path.is_file() or path.suffix.lower() not in {".pdf", ".md"}:
+    for root, base_dir in roots:
+        if not Path(root).is_dir():
             continue
-        rel_parts = path.relative_to(repo).parts
-        if any(p in {".git", "node_modules", "lib", "out", "cache"} for p in rel_parts):
-            continue
-        in_audit_dir = any(_AUDIT_DIR.match(p) for p in rel_parts[:-1])
-        name = path.name
-        if not (in_audit_dir or _AUDIT_FILE.search(name)):
-            continue
-        parsed = _date_from_name(name)
-        date = parsed.isoformat() if parsed else None
-        if date is None:
-            date = _git_file_date(repo, path.relative_to(repo).as_posix())
-        m = _FIRM_IN_NAME.search(name)
-        found.append({
-            "file": str(path.relative_to(repo)),
-            "firm": m.group(1) if m else None,
-            "date": date,
-            "date_source": "filename" if parsed else ("git" if date else None),
-            # A git date is a commit date, not an audit date. If the report was
-            # added by a bulk re-upload ("Add files via upload"), the git date is
-            # the upload date and can be arbitrarily later than the review. Using
-            # it as the audit baseline silently hides any real post-audit delta,
-            # so callers must be able to see that it happened and override it.
-            "date_confidence": "high" if parsed else "low",
-        })
+        for path in Path(root).rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in {".pdf", ".md"}:
+                continue
+            rel_parts = path.relative_to(Path(root)).parts
+            if any(p in {".git", "node_modules", "lib", "out", "cache"} for p in rel_parts):
+                continue
+            in_audit_dir = any(_AUDIT_DIR.match(p) for p in rel_parts[:-1])
+            name = path.name
+            if not (in_audit_dir or _AUDIT_FILE.search(name)):
+                continue
+            parsed = _date_from_name(name)
+            date = parsed.isoformat() if parsed else None
+            if date is None:
+                # fall back to the commit date of the report in whichever git
+                # root it lives, so an undated report is never dropped
+                date = _git_file_date(Path(root), path.relative_to(Path(root)).as_posix())
+            m = _FIRM_IN_NAME.search(name)
+            found.append({
+                "file": str(path.relative_to(base_dir)),
+                "firm": m.group(1) if m else None,
+                "date": date,
+                "date_source": "filename" if parsed else ("git" if date else None),
+                # A git date is a commit date, not an audit date. If the report was
+                # added by a bulk re-upload ("Add files via upload"), the git date is
+                # the upload date and can be arbitrarily later than the review. Using
+                # it as the audit baseline silently hides any real post-audit delta,
+                # so callers must be able to see that it happened and override it.
+                "date_confidence": "high" if parsed else "low",
+            })
     found.sort(key=lambda a: (a["date"] or ""), reverse=True)
     return found
 
@@ -300,15 +311,20 @@ def reachability(repo: Path, files: list[dict[str, _t.Any]]) -> dict[str, _t.Any
 # --------------------------------------------------------------------------- #
 
 
-def gate_repo(repo: Path, audit_date: str | None = None) -> dict[str, _t.Any]:
+def gate_repo(
+    repo: Path,
+    audit_date: str | None = None,
+    audits_dir: list[Path] | None = None,
+) -> dict[str, _t.Any]:
     """Apply checks 2 and 3 to a single local repository.
 
     `audit_date` (ISO) overrides the detected baseline. Use it whenever
     `baseline_low_confidence` is true: a git-derived date reflects when the PDF
     was committed, which for a bulk re-upload is not when the audit happened.
+    `audits_dir` points at a separate report corpus when the repo carries none.
     """
     repo = Path(repo).resolve()
-    audits = find_audits(repo)
+    audits = find_audits(repo, extra_dirs=[Path(d) for d in (audits_dir or [])])
     dated = [a for a in audits if a["date"]]
     detected = max((a["date"] for a in dated), default=None)
 
@@ -331,6 +347,17 @@ def gate_repo(repo: Path, audit_date: str | None = None) -> dict[str, _t.Any]:
     warnings: list[str] = []
     if not audits:
         blockers.append("NO_AUDIT_BASELINE")
+    elif baseline is None:
+        # Reports exist but none carries a usable date (no git history, or an
+        # unparseable filename). We do NOT know the baseline. Claiming
+        # NO_UNCOVERED_CODE here would be a false reject that discards a live
+        # target, which is as damaging as the false passes this gate exists to
+        # remove.
+        blockers.append("AUDIT_DATE_UNKNOWN")
+        warnings.append(
+            f"{len(audits)} audit report(s) found but none datable; "
+            "supply --audit-date rather than treating this as no new code"
+        )
     elif not delta:
         blockers.append("NO_UNCOVERED_CODE")
     elif not reach["has_permissionless"]:
@@ -340,6 +367,20 @@ def gate_repo(repo: Path, audit_date: str | None = None) -> dict[str, _t.Any]:
             f"audit baseline {baseline} is git-derived (likely a bulk re-upload); "
             "re-run with --audit-date to confirm"
         )
+
+    if blockers:
+        verdict = "REJECT"
+    elif baseline_low_confidence:
+        # A clean PASS here would be a false positive: the baseline is not
+        # trustworthy, so the delta it produced cannot be. UNVERIFIED forces a
+        # human to pin the real audit date before anyone reads the delta.
+        verdict = "UNVERIFIED"
+        warnings.append(
+            "PASS withheld: baseline confidence too low to assert uncovered code; "
+            "supply --audit-date"
+        )
+    else:
+        verdict = "PASS"
 
     return {
         "repo": str(repo),
@@ -354,7 +395,7 @@ def gate_repo(repo: Path, audit_date: str | None = None) -> dict[str, _t.Any]:
         "reachability": reach,
         "blockers": blockers,
         "warnings": warnings,
-        "verdict": "PASS" if not blockers else "REJECT",
+        "verdict": verdict,
     }
 
 

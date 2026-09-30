@@ -17,10 +17,12 @@ app = typer.Typer(help="Screen targets for admissibility before reading any code
 def gate_repo_cmd(
     path: str = typer.Argument(..., help="Path to a local git repository"),
     audit_date: str = typer.Option("", "--audit-date", help="Override audit baseline (ISO date)"),
+    audits_dir: str = typer.Option("", "--audits-dir", help="Extra directory holding audit reports (separate corpus repo)"),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
 ):
     """Gate a single local repository: audit baseline, uncovered delta, reachability."""
-    result = gate_repo(Path(path), audit_date=audit_date or None)
+    extra = [d.strip() for d in audits_dir.split(",") if d.strip()] if audits_dir else None
+    result = gate_repo(Path(path), audit_date=audit_date or None, audits_dir=extra)
     if json_output:
         typer.echo(json.dumps(result, indent=2))
         return

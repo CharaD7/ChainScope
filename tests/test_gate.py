@@ -268,6 +268,22 @@ def test_gate_reports_missing_audit_baseline(tmp_path):
     assert "NO_AUDIT_BASELINE" in g["blockers"]
 
 
+def test_undatable_audit_is_not_reported_as_no_new_code(tmp_path):
+    """A false reject discards a live target, so it must not happen.
+
+    Reports that exist but cannot be dated mean the baseline is UNKNOWN. Calling
+    that "NO_UNCOVERED_CODE" asserts the opposite of what we know.
+    """
+    (tmp_path / "audits").mkdir()
+    (tmp_path / "audits" / "Anonymous Review.pdf").write_bytes(b"%PDF-")
+    (tmp_path / "C.sol").write_text("contract C { function f() external {} }")
+    g = gate_repo(tmp_path)
+    assert g["audit_count"] == 1
+    assert "AUDIT_DATE_UNKNOWN" in g["blockers"]
+    assert "NO_UNCOVERED_CODE" not in g["blockers"]
+    assert any("--audit-date" in w for w in g["warnings"])
+
+
 @pytest.mark.skipif(not HYPERVISOR.exists(), reason="hypervisor clone not present")
 def test_hypervisor_gate_flags_low_confidence_baseline():
     """Must warn rather than assert a git-derived baseline as fact."""
