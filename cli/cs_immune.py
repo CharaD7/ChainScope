@@ -176,6 +176,7 @@ def _program_block(raw: str, slug: str) -> dict[str, typing.Any] | None:
         return None
     obj: dict[str, typing.Any] = {k: _scalars(seg, k) for k in _SCALARS}
     obj["_seg"] = seg
+    obj["_raw"] = text
     obj["audits"] = _audits(seg)
     # knownIssues is an array; count its top-level entries.
     ki = seg.find('"knownIssues":')
@@ -341,11 +342,69 @@ def _known_issues_count(value: typing.Any) -> int:
     return 0
 
 
+# Audit firms commonly cited in published reports. Presence of any of these in the
+# program payload is evidence the surface has been externally reviewed, which is a
+# far better dedup signal than the `audits[]` field (see _audit_evidence).
+_AUDIT_FIRMS = (
+    "paladin", "openzeppelin", "slowmist", "certik", "peckshield", "chainsecurity",
+    "ottersec", "tontech", "certora", "cantina", "hacken", "code4rena",
+    "spearbit", "sigmasecurity", "sigma prime", "sigmaprime", "zellic", "soliditylabs",
+    "secure3", "sherlock", "quantstamp", "pashsig",
+    "cubicfuzz", "cubic fuzz", "level5", "frankendend", "thorchain",
+    "chainalysis", "nethermind", "inno/conf", "stakey", "redbull", "tether treasury",
+)
+
+# Terms that collide with product names, only counted next to audit context.
+_AUDIT_CONTEXT = ("audit", "audits", "audited", "security review", "reviewed by", "report")
+
+_AUDIT_AMBIGUOUS = ("guardian", "otter", "sablier", "tether")
+
+_AUDIT_URL_RE = re.compile(
+    r"https?://[^\s\"'<>\\]*?(?:audits?|security[-_]?(?:review|report)s?|medusa|audit[-_]reports?)[^\s\"'<>\\]*",
+    re.I,
+)
+
+
+def _audit_evidence(seg: str, raw: str) -> dict[str, typing.Any]:
+    """Independently detect evidence of external audit coverage.
+
+    The `audits[]` field is unusable as a dedup signal: it only records whether a
+    program *author chose to populate a field*, not whether it was reviewed. GMX,
+    Chainlink and Arbitrum all report `audits: 0` while being among the most
+    audited codebases in web3 - and that mis-signal repeatedly steered target
+    selection toward mature programs during the 2026-09-28/30 sessions.
+
+    Instead, scan the whole payload for audit-firm names and audit-report URLs.
+    A program with real published reviews almost always references them somewhere
+    (Origin links a `security` repo; Lombard ships reports in-repo; Celer links its
+    cBridge docs). Absence of any such reference is the strongest available negative
+    signal - not proof, but far better than the count field.
+    """
+    haystack = f"{seg}\n{raw}".lower()
+    firms = {f for f in _AUDIT_FIRMS if f in haystack}
+    # ambiguous names only count when audit wording is adjacent (avoids matching
+    # Celer's "State Guardian Network" or a token named Tether)
+    for amb in _AUDIT_AMBIGUOUS:
+        if amb in haystack and any(c in haystack for c in _AUDIT_CONTEXT):
+            # require the firm token in a run that also reads like a reference
+            if re.search(rf"\b{re.escape(amb)}\b[^\n]{{0,60}}\b(?:audit|report|review)\b", haystack):
+                firms.add(amb)
+    firms = sorted(firms)
+    urls = sorted({u[:120] for u in _AUDIT_URL_RE.findall(raw)})
+    return {
+        "audit_firms": firms,
+        "audit_urls": urls[:8],
+        "audit_evidence": bool(firms or urls),
+    }
+
+
 def _row(p: dict[str, typing.Any]) -> dict[str, typing.Any]:
     seg = p.get("_seg") or ""
     audits = p.get("audits") or []
     updated = _iso_epoch(p.get("updatedDate"))
     tiers = _tiers(seg) if seg else {}
+    ev = _audit_evidence(seg, p.get("_raw") or "") if seg else {
+        "audit_firms": [], "audit_urls": [], "audit_evidence": False}
     critical = tiers.get("Critical", {})
     high = tiers.get("High", {})
     # maxBounty is the AUTHORITATIVE ceiling. The payload also carries stale
@@ -378,6 +437,9 @@ def _row(p: dict[str, typing.Any]) -> dict[str, typing.Any]:
         "primacy_critical": critical.get("primacy") or p.get("primacy"),
         "network": p.get("networkType"),
         "audits": len(audits),
+        "audit_evidence": ev["audit_evidence"],
+        "audit_firms": ev["audit_firms"],
+        "audit_urls": ev["audit_urls"],
         "audit_refs": [{"auditor": a.get("auditor"), "date": a.get("date"), "url": a.get("url")} for a in audits],
         "known_issues": _known_issues_count(p.get("knownIssues")),
     }
@@ -508,8 +570,17 @@ def _keizo(p: dict[str, typing.Any], now: float) -> dict[str, typing.Any]:
         age_days = max(0.0, (now - row["updated"]) / 86400.0)
         fresh = max(0.0, 1.0 - age_days / 365.0)
     payout = min(1.0, math.log10(1.0 + row["max_bounty"]) / 6.0)
-    # More audits => more of the surface is documented => less likely novel.
-    dedup_load = min(1.0, row["audits"] / 6.0)
+    # Dedup load. `audits` (the page field) only records whether a program chose
+    # to populate a field, so prefer independent audit EVIDENCE when available.
+    n_audits = row.get("audits", 0)
+    has_ev = bool(row.get("audit_evidence"))
+    if has_ev:
+        # evidence of review: count firms/urls, default to a meaningful load even at 0
+        load = max(min(1.0, len(row.get("audit_firms", [])) / 3.0),
+                    0.5 if row.get("audit_urls") else 0.0)
+    else:
+        load = min(1.0, n_audits / 6.0)
+    dedup_load = load
     impact = 1.0 if row["primacy_critical"] == "primacy_of_impact" else 0.0
     poc = 1.0 if row["poc"] else 0.0
     score = round(
@@ -521,6 +592,8 @@ def _keizo(p: dict[str, typing.Any], now: float) -> dict[str, typing.Any]:
         "fresh": round(fresh, 3),
         "payout": round(payout, 3),
         "unmined": round(1.0 - dedup_load, 3),
+        "dedup_load": round(dedup_load, 3),
+        "audit_evidence": has_ev,
         "primacy_impact": impact,
         "poc_required": poc,
     }
@@ -532,17 +605,24 @@ def keizo_rank(
     min_bounty: float = typer.Option(0, "--min-bounty", help="Min max-bounty in USD"),
     only_impact: bool = typer.Option(False, "--only-impact", help="Only Primacy of Impact programs"),
     no_audits: bool = typer.Option(False, "--no-audits", help="Exclude programs with published audits"),
+    verify_audits: bool = typer.Option(False, "--verify-audits",
+        help="Use independently detected audit evidence instead of the page's audits[] field (recommended)"),
     top: int = typer.Option(15, "--top", help="How many programs to list"),
     refresh: bool = typer.Option(False, "--refresh", help="Force re-fetch (ignore 24h cache)"),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
 ):
-    """Rank Immunefi programs: fresh scope + payout + low dedup load + broad scope."""
+    """Rank Immunefi programs: fresh scope + payout + low dedup load + broad scope.
+
+    The page's `audits[]` field is NOT reliable coverage evidence (GMX/Chainlink/Arbitrum
+    all report 0). Use --verify-audits to rank on detected audit references instead."""
     programs = _load(refresh)
     now = time.time()
     rows = [_keizo(p, now) for p in programs]
     rows = [r for r in rows if r["max_bounty"] >= min_bounty]
     if only_impact:
         rows = [r for r in rows if r["primacy_critical"] == "primacy_of_impact"]
+    if verify_audits:
+        rows = [r for r in rows if not r.get("audit_evidence")]
     if no_audits:
         rows = [r for r in rows if not r["audits"]]
     rows.sort(key=lambda r: r["keizo"], reverse=True)
@@ -600,7 +680,11 @@ def show_meta(
     typer.echo(f"  launched      : {row['launch_date']}")
     typer.echo(f"  last updated  : {row['updated_date']}")
     typer.echo(f"  network       : {row['network']}")
-    typer.echo(f"  primacy       : {row['primacy']}")
+    typer.echo(f"  primacy (dflt) : {row['primacy_default']}")
+    typer.echo(f"  primacy (crit) : {row['primacy_critical']}")
+    crit = row.get("critical_payout")
+    if crit:
+        typer.echo(f"  tier claim    : {crit} (cross-check only)")
     typer.echo(f"  PoC required  : {row['poc']}")
     typer.echo(f"  KYC required  : {row['kyc']}")
     typer.echo(f"  known issues  : {row['known_issues']}")

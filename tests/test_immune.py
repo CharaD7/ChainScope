@@ -257,3 +257,37 @@ def test_row_exposes_per_tier_primacy():
     })
     assert row["primacy_default"] == "primacy_of_rules"   # program default
     assert row["primacy_critical"] == "primacy_of_impact"  # tier override
+
+
+# --- audit-evidence detection (2026-09-30) ---------------------------------
+# The `audits[]` field records only whether a program populated a field, not
+# whether it was reviewed. These pin the replacement signal.
+
+def test_audit_evidence_detects_named_firm():
+    from cli.cs_immune import _audit_evidence
+    ev = _audit_evidence("", "the Paladin report is at github.com/x/audit-reports")
+    assert ev["audit_evidence"] is True
+    assert "paladin" in ev["audit_firms"]
+
+
+def test_audit_evidence_detects_audit_url():
+    from cli.cs_immune import _audit_evidence
+    ev = _audit_evidence("", "see https://github.com/org/security-reports")
+    assert ev["audit_evidence"] is True
+
+
+def test_audit_evidence_absent_for_clean_page():
+    from cli.cs_immune import _audit_evidence
+    ev = _audit_evidence("", "a bridge with no external references at all")
+    assert ev["audit_evidence"] is False
+    assert ev["audit_firms"] == []
+
+
+def test_audit_evidence_guardian_needs_audit_context():
+    # Celer's product is the "State Guardian Network" - Guardian is an audit firm
+    # too, so the bare word must not count.
+    from cli.cs_immune import _audit_evidence
+    ev = _audit_evidence("", "the State Guardian Network secures the bridge")
+    assert "guardian" not in ev["audit_firms"]
+    ev2 = _audit_evidence("", "Guardian audit report published by the team")
+    assert "guardian" in ev2["audit_firms"]
