@@ -113,26 +113,45 @@ ASSET_MODELS: dict[str, t.Callable[[int, int, int], int]] = {
 def donation_attack(
     convert_to_shares: t.Callable[[int, int, int], int],
     *,
+    convert_to_assets: t.Callable[[int, int, int], int] | None = None,
     attacker_deposit: int = 10 ** 18,
     donation: int = 100 * 10 ** 18,
     victim_deposit: int = 10 ** 18,
+    victim_deposit_reverts: bool = True,
 ) -> dict[str, t.Any]:
     """Model the canonical first-depositor inflation attack and price it out.
 
     Sequence, all of it permissionless:
-      1. attacker seeds the vault (often a wei, here a tunable deposit)
+      1. attacker seeds the vault
       2. attacker donates directly to the vault, raising assets but not supply
       3. victim deposits and receives shares priced against the inflated ratio
       4. attacker redeems everything
 
-    Returns attacker profit and victim loss in the same units as the inputs, so
-    a caller can compare directly against a threshold.
+    `victim_deposit_reverts` decides what happens when the victim's deposit would
+    mint zero shares, and it decides whether the attack works at all. Most
+    ERC4626 implementations (OpenZeppelin included) revert on a zero-share mint,
+    and on those vaults the victim simply cannot deposit: nothing enters the
+    pool and the attacker extracts nothing. A vault that accepts a zero-share
+    mint hands the whole deposit to the existing holder instead. Reporting the
+    vulnerable branch unconditionally - which an earlier version did - turns a
+    non-issue into a Critical, so the regime is an explicit input and appears in
+    the result.
     """
     to_shares = convert_to_shares
+    # Redemption must go through the vault's OWN maths. Assuming the plain
+    # `shares * assets / supply` ratio is only correct for a vault with no virtual
+    # or dead shares; against an offset vault it misprices the redemption by
+    # orders of magnitude and can even report a negative victim loss, which is
+    # impossible. Pass the matching convertToAssets.
+    if convert_to_assets is None:
+        def convert_to_assets(ta: int, ts: int, shares: int) -> int:  # noqa: ANN202
+            return shares if ts == 0 else shares * ta // ts
 
-    # 1. seed
-    total_assets = attacker_deposit
-    total_supply = to_shares(total_assets, total_supply=0, assets=attacker_deposit)
+    # 1. seed, priced against a genuinely empty vault. Using total_assets =
+    #    attacker_deposit here mis-mints the seed for any model with virtual
+    #    shares, because the real mint reads the vault before it is credited.
+    total_assets = 0
+    total_supply = to_shares(0, 0, attacker_deposit)
     if total_supply == 0:
         return {
             "viable": False,
@@ -140,24 +159,28 @@ def donation_attack(
             "attacker_profit": 0,
             "victim_loss": 0,
             "victim_shares": 0,
+            "assumptions": [],
         }
     attacker_shares = total_supply
+    total_assets += attacker_deposit
 
     # 2. donation: assets rise, supply does not
     total_assets += donation
 
     # 3. victim deposit
     victim_shares = to_shares(total_assets, total_supply, victim_deposit)
-    total_assets += victim_deposit
-    total_supply += victim_shares
+    reverted = victim_shares == 0 and victim_deposit_reverts
+    if not reverted:
+        total_assets += victim_deposit
+        total_supply += victim_shares
 
     # 4. attacker redeems everything
-    attacker_out = attacker_shares * total_assets // total_supply
+    attacker_out = convert_to_assets(total_assets, total_supply, attacker_shares)
 
     attacker_profit = attacker_out - attacker_deposit - donation
     # assets are conserved: what the attacker extracts beyond their own
     # contribution is exactly what the victim fails to receive
-    victim_value_out = victim_shares * total_assets // total_supply
+    victim_value_out = convert_to_assets(total_assets, total_supply, victim_shares)
     victim_loss = victim_deposit - victim_value_out
 
     return {
@@ -166,12 +189,15 @@ def donation_attack(
         "victim_loss": victim_loss,
         "victim_shares": victim_shares,
         "attacker_out": attacker_out,
+        "victim_deposit_reverted": reverted,
         "share_price_before_donation": _share_price(attacker_deposit, attacker_shares),
         "share_price_after_donation": _share_price(total_assets, total_supply),
         "assumptions": [
             "donation is a plain transfer to the vault, no hooks",
             "attacker pays attacker_deposit + donation and can redeem in full",
             "victim deposit is not protected by a minimum-shares check",
+            "vault reverts a zero-share mint" if victim_deposit_reverts
+            else "vault accepts a zero-share mint",
         ],
     }
 
@@ -185,6 +211,7 @@ def _share_price(total_assets: int, total_supply: int) -> float:
 def scan_donation_sensitivity(
     convert_to_shares: t.Callable[[int, int, int], int],
     *,
+    convert_to_assets: t.Callable[[int, int, int], int] | None = None,
     # Seeds must span orders of magnitude down to 1 wei. The inflation attack is
     # most severe when the attacker's seed is negligible next to the victim
     # deposit: at a seed of 1 wei the victim is minted ZERO shares and loses the
@@ -196,6 +223,7 @@ def scan_donation_sensitivity(
     deposits: tuple[int, ...] = (1, 10, 10 ** 3, 10 ** 6, 10 ** 9, 10 ** 12, 10 ** 15, 10 ** 18),
     donations: tuple[int, ...] = (10 ** 17, 10 ** 18, 10 ** 19, 10 ** 20),
     victim_deposit: int = 10 ** 18,
+    victim_deposit_reverts: bool = True,
 ) -> list[dict[str, t.Any]]:
     """Sweep seed/donation sizes; report the combination that extracts the most.
 
@@ -207,9 +235,11 @@ def scan_donation_sensitivity(
         for don in donations:
             r = donation_attack(
                 convert_to_shares,
+                convert_to_assets=convert_to_assets,
                 attacker_deposit=dep,
                 donation=don,
                 victim_deposit=victim_deposit,
+                victim_deposit_reverts=victim_deposit_reverts,
             )
             r["attacker_deposit"] = dep
             r["donation"] = don

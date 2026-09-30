@@ -42,17 +42,35 @@ W = 10 ** 18
 # --------------------------------------------------------------------------- #
 
 
-def test_naive_vault_loses_the_whole_deposit_at_tiny_seed():
+def test_naive_vault_loses_whole_deposit_when_zero_share_mints_accepted():
     """The canonical catastrophic case, and the one a narrow sweep misses.
 
     At a 1-wei seed the attacker's share count is 1, so the victim's shares
-    floor to zero and the entire deposit is extractable.
+    floor to zero. If the vault accepts that mint the whole deposit is
+    extractable.
     """
-    r = donation_attack(erc4626_naive, attacker_deposit=1, donation=100 * W, victim_deposit=W)
+    r = donation_attack(erc4626_naive, attacker_deposit=1, donation=100 * W,
+                        victim_deposit=W, victim_deposit_reverts=False)
     assert r["victim_shares"] == 0
     assert r["victim_loss"] == W
     assert r["attacker_profit"] > 0
     assert r["viable"] is True
+
+
+def test_reverting_zero_share_mint_defuses_the_attack():
+    """The same attack against a vault that reverts a zero-share mint.
+
+    This is the realistic case - OpenZeppelin's ERC4626 reverts - and it is why
+    the revert behaviour has to be an explicit input rather than an assumption.
+    Reporting the vulnerable branch unconditionally turns a non-issue into a
+    Critical. Bound to EVM: `tools/econ_harness` runs this exact sequence against
+    a Solidity fixture that reverts, and the two must agree.
+    """
+    r = donation_attack(erc4626_naive, attacker_deposit=1, donation=100 * W,
+                        victim_deposit=W, victim_deposit_reverts=True)
+    assert r["victim_deposit_reverted"] is True
+    assert r["attacker_profit"] == 0
+    assert r["viable"] is False
 
 
 def test_attacker_seed_equal_to_victim_deposit_extracts_nothing():
@@ -63,32 +81,35 @@ def test_attacker_seed_equal_to_victim_deposit_extracts_nothing():
     extraction. Reporting only this case would understate the bug; reporting only
     the 1-wei case would overstate it.
     """
-    r = donation_attack(erc4626_naive, attacker_deposit=W, donation=100 * W, victim_deposit=W)
+    r = donation_attack(erc4626_naive, attacker_deposit=W, donation=100 * W,
+                        victim_deposit=W, victim_deposit_reverts=False)
     assert r["attacker_profit"] <= 100
     assert r["victim_loss"] <= 100
 
 
 def test_offset_and_dead_share_vaults_are_not_viable():
-    for fn in (erc4626_virtual, erc4626_dead_shares):
-        best = scan_donation_sensitivity(fn)[0]
+    for fn, red in ((erc4626_virtual, ASSET_MODELS["virtual_offset"]),
+                    (erc4626_dead_shares, ASSET_MODELS["dead_shares"])):
+        best = scan_donation_sensitivity(fn, convert_to_assets=red)[0]
         assert best["attacker_profit"] <= 0, fn.__name__
         assert best["viable"] is False
 
 
 def test_sweep_reaches_the_tiny_seed_regime():
     """Regression: seeds starting at 1e15 miss the total-loss case entirely."""
-    best = scan_donation_sensitivity(erc4626_naive)[0]
+    best = scan_donation_sensitivity(erc4626_naive, victim_deposit_reverts=False)[0]
     assert best["attacker_deposit"] == 1
     assert best["victim_shares"] == 0
 
 
 def test_sweep_orders_worst_case_first():
-    rows = scan_donation_sensitivity(erc4626_naive)
+    rows = scan_donation_sensitivity(erc4626_naive, victim_deposit_reverts=False)
     assert rows == sorted(rows, key=lambda r: r["attacker_profit"], reverse=True)
 
 
 def test_donation_raises_share_price():
-    r = donation_attack(erc4626_naive, attacker_deposit=W, donation=100 * W, victim_deposit=W)
+    r = donation_attack(erc4626_naive, attacker_deposit=W, donation=100 * W,
+                        victim_deposit=W, victim_deposit_reverts=False)
     assert r["share_price_after_donation"] > r["share_price_before_donation"]
 
 
