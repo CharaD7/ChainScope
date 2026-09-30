@@ -175,6 +175,7 @@ def _program_block(raw: str, slug: str) -> dict[str, typing.Any] | None:
     if '"slug"' not in seg:
         return None
     obj: dict[str, typing.Any] = {k: _scalars(seg, k) for k in _SCALARS}
+    obj["_seg"] = seg
     obj["audits"] = _audits(seg)
     # knownIssues is an array; count its top-level entries.
     ki = seg.find('"knownIssues":')
@@ -251,27 +252,125 @@ def _load(refresh: bool = False) -> list[dict[str, typing.Any]]:
     return out
 
 
-def _row(p: dict[str, typing.Any]) -> dict[str, typing.Any]:
-    audits = p.get("audits") or []
+def _iso_epoch(value: typing.Any) -> float:
+    """Parse an ISO-8601 timestamp (Immunefi's format) into epoch seconds.
+
+    The RSC payload carries `updatedDate`/`launchDate` as strings such as
+    "2026-09-09T13:05:59.009Z", NOT epoch millis. Parsing them as a float threw
+    and silently defaulted `updated` to 0, which zeroed the freshness signal for
+    every program and made the whole keizo ranking meaningless. Handles both
+    formats so a future payload change degrades rather than breaks.
+    """
+    if value is None or value == "":
+        return 0.0
+    if isinstance(value, (int, float)):
+        v = float(value)
+        return v / 1000.0 if v > 1e11 else v
+    text = str(value).strip()
     try:
-        updated = float(p.get("updatedDate") or 0) / 1000.0
+        return float(text) / (1000.0 if float(text) > 1e11 else 1.0)
     except (TypeError, ValueError):
-        updated = 0.0
+        pass
+    from datetime import datetime, timezone
+
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).replace(
+            tzinfo=datetime.fromisoformat(text.replace("Z", "+00:00")).tzinfo or timezone.utc
+        ).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
+
+
+# Payout formats seen in the wild:
+#   "Up to USD $2,000,000"        (celer)
+#   "USD $50,000 - USD $250,000"   (lombard-finance, range with dash)
+#   "USD $15,000 to USD $30,000"  (lombard-finance legacy list, range with "to")
+#   "USD $100,000"                 (single)
+# The ceiling for ranking is the UPPER bound of whichever applies.
+_TIER_RE = (
+    r'"level"\s*:\s*"(Critical|High|Medium|Low|Informational)"\s*,\s*"payout"\s*:\s*'
+    r'"(?:Up to )?USD \$([\d,]+)(?:\s*(?:to|-)\s*(?:USD \$)?([\d,]+))?"'
+)
+
+
+def _tiers(seg: str) -> dict[str, dict[str, typing.Any]]:
+    """Parse the per-severity reward table.
+
+    Two bugs this fixes:
+      1. `maxBounty` is not the ceiling. Celer reported 200,000 while its Critical
+         tier is 2,000,000 - a 10x understatement that mis-ranked targets.
+      2. Payouts may be RANGES ("USD $50,000 - USD $250,000"). The first capture
+         group is the floor, so taking it as the ceiling under-reports by 5x.
+    """
+    found: dict[str, dict[str, typing.Any]] = {}
+    for m in re.finditer(_TIER_RE, seg):
+        level = m.group(1)
+        lo = float(m.group(2).replace(",", ""))
+        hi = float((m.group(3) or m.group(2)).replace(",", ""))
+        # legacy_*_rewards is listed FIRST and is stale; the current list comes
+        # later, so last-wins is correct here (inverse of the naive assumption).
+        found[level] = {"floor": lo, "payout": hi, "primacy": None}
+    for m in re.finditer(
+        r'"primacy"\s*:\s*"(primacy_of_impact|primacy_of_rules)"\s*,\s*"severity"\s*:\s*"(Critical|High|Medium|Low)"',
+        seg,
+    ):
+        prim, sev = m.group(1), m.group(2).title()
+        if sev in found:
+            found[sev]["primacy"] = prim
+    return found
+
+
+def _known_issues_count(value: typing.Any) -> int:
+    """knownIssues arrives as an int in some payloads and a JSON array in others
+    (e.g. "[]" or []). Never let a representation difference crash the ranking."""
+    if value is None or value == "":
+        return 0
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, list):
+        return len(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isdigit():
+            return int(text)
+        if text.startswith("["):
+            inner = text.strip("[]").strip()
+            return 0 if not inner else inner.count("{")
+    return 0
+
+
+def _row(p: dict[str, typing.Any]) -> dict[str, typing.Any]:
+    seg = p.get("_seg") or ""
+    audits = p.get("audits") or []
+    updated = _iso_epoch(p.get("updatedDate"))
+    tiers = _tiers(seg) if seg else {}
+    critical = tiers.get("Critical", {})
+    high = tiers.get("High", {})
+    # Ceiling = the Critical tier when published, else maxBounty.
+    ceiling = critical.get("payout") or float(p.get("maxBounty") or 0)
     return {
         "slug": p.get("_slug") or p.get("slug"),
         "project": p.get("project"),
         "url": f"https://immunefi.com/bug-bounty/{p.get('_slug') or p.get('slug')}/information/",
-        "max_bounty": float(p.get("maxBounty") or 0),
+        "max_bounty": ceiling,
+        "tiers": tiers,
+        "critical_payout": critical.get("payout"),
+        "high_payout": high.get("payout"),
         "updated": updated,
         "updated_date": (p.get("updatedDate") or "")[:10],
         "launch_date": (p.get("launchDate") or "")[:10],
         "kyc": bool(p.get("kyc")),
         "poc": (p.get("proofOfConceptType") or "").lower() in ("required", "true", "yes"),
-        "primacy": p.get("primacy"),
+        # Immunefi supports PER-TIER primacy. The program default is `primacy`, and
+        # a tier may override it. Surface both instead of collapsing to one value.
+        "primacy_default": p.get("primacy"),
+        "primacy_critical": critical.get("primacy") or p.get("primacy"),
         "network": p.get("networkType"),
         "audits": len(audits),
         "audit_refs": [{"auditor": a.get("auditor"), "date": a.get("date"), "url": a.get("url")} for a in audits],
-        "known_issues": int(p.get("knownIssues") or 0),
+        "known_issues": _known_issues_count(p.get("knownIssues")),
     }
 
 

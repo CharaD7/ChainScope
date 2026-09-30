@@ -187,3 +187,58 @@ def test_catalog_drops_navigation_slugs(monkeypatch):
     assert "aera" in slugs and "some-program" in slugs
     assert "list" not in slugs
     assert "information" not in slugs
+
+
+# --- reward-tier parsing (regressions found 2026-09-30) -----------------------
+
+def test_tiers_parses_up_to_format():
+    from cli.cs_immune import _tiers
+    seg = '{"level":"Critical","payout":"Up to USD $2,000,000"},{"level":"High","payout":"USD $100,000"}'
+    t = _tiers(seg)
+    assert t["Critical"]["payout"] == 2_000_000
+    assert t["High"]["payout"] == 100_000
+
+
+def test_tiers_takes_upper_bound_of_a_range():
+    # Lombard publishes ranges; taking the floor would under-report 5x.
+    from cli.cs_immune import _tiers
+    seg = '{"level":"Critical","payout":"USD $50,000 - USD $250,000"}'
+    t = _tiers(seg)
+    assert t["Critical"]["floor"] == 50_000
+    assert t["Critical"]["payout"] == 250_000
+
+
+def test_tiers_prefers_later_list_over_legacy():
+    # legacy list is listed first and is stale; last-wins is correct.
+    from cli.cs_immune import _tiers
+    seg = (
+        '{"level":"Critical","payout":"USD $15,000 to USD $30,000"}'
+        '{"level":"Critical","payout":"USD $50,000 - USD $250,000"}'
+    )
+    t = _tiers(seg)
+    assert t["Critical"]["payout"] == 250_000
+
+
+def test_row_ceiling_prefers_critical_over_maxbounty():
+    from cli.cs_immune import _row
+    row = _row({
+        "_slug": "x", "maxBounty": 200_000, "primacy": "primacy_of_rules",
+        "audits": [], "knownIssues": "[]", "updatedDate": "2026-09-09T00:00:00.000Z",
+        "_seg": '{"level":"Critical","payout":"Up to USD $2,000,000"}',
+    })
+    assert row["critical_payout"] == 2_000_000
+    assert row["max_bounty"] == 2_000_000   # ceiling, not the stale maxBounty
+
+
+def test_row_exposes_per_tier_primacy():
+    from cli.cs_immune import _row
+    row = _row({
+        "_slug": "x", "maxBounty": 1, "primacy": "primacy_of_rules",
+        "audits": [], "knownIssues": "[]", "updatedDate": "2026-09-09T00:00:00.000Z",
+        "_seg": (
+            '{"level":"Critical","payout":"Up to USD $10,000"}'
+            '"primacy":"primacy_of_impact","severity":"Critical"'
+        ),
+    })
+    assert row["primacy_default"] == "primacy_of_rules"   # program default
+    assert row["primacy_critical"] == "primacy_of_impact"  # tier override
