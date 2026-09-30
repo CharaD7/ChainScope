@@ -74,17 +74,25 @@ def _load(refresh: bool = False) -> list[dict[str, typing.Any]]:
 
 
 def _row(p: dict[str, typing.Any]) -> dict[str, typing.Any]:
+    # The Sherlock index only publishes {currency, id, max_bounty, title}.
+    # Status, report count and contest type are NOT in that payload, so they are
+    # reported as None rather than invented. Hardcoding status="Active" and
+    # reports=0 made every finished contest look live and uncompeted, which is
+    # exactly the kind of fabricated field that wrecks target selection.
     return {
         "title": p.get("title", "Unknown"),
         "url": f"https://audits.sherlock.xyz/bug-bounties",
         "slug": p.get("title", "").lower().replace(" ", "-"),
         "rep": None,
         "max_bounty": float(p.get("max_bounty", 0.0)),
-        "reports": 0,
-        "status": "Active",
-        "type": "Smart Contract",
+        "reports": None,
+        "status": None,
+        "type": None,
         "platform": "Sherlock",
-        "sc": True,
+        "sc": None,
+        "fields_unavailable": [
+            "status", "reports", "type", "sc",
+        ],
         "raw": p,
     }
 
@@ -113,12 +121,13 @@ def list_programs(
         typer.echo("No programs match the filters.", err=True)
         raise typer.Exit(1)
         
-    typer.echo(f"{len(rows)} Sherlock program(s) match (max>={min_bounty:g}):")
-    for r in rows:
-        typer.echo(
-            f"  up to ${r['max_bounty']:>10,.0f}  {r['type']:>12s}  "
-            f"{r['title']}  {r['url']}"
-        )
+    if not json_output:
+            typer.echo(f"{len(rows)} Sherlock program(s) match (max>={min_bounty:g}):")
+            for r in rows:
+                typer.echo(
+                    f"  up to ${r['max_bounty']:>10,.0f}  {r['type']:>12s}  "
+                    f"{r['title']}  {r['url']}"
+                )
     if json_output:
         typer.echo(json.dumps(rows, indent=2))
 
@@ -154,14 +163,15 @@ def keizo_rank(
         typer.echo("No programs match the filters.", err=True)
         raise typer.Exit(1)
         
-    typer.echo(f"Keizo ranking (Sherlock, max>={min_bounty:g}):")
-    for r in rows:
-        s = r["signals"]
-        typer.echo(
-            f"  keizo={r['keizo']:.3f}  up to ${r['max_bounty']:>10,.0f}  "
-            f"{r['type']:>12s}  {r['title']}"
-        )
-        typer.echo(f"      fresh={s['fresh']:.2f} payout={s['payout']:.2f} open_gate={s['open_gate']:.0f}")
+    if not json_output:
+            typer.echo(f"Keizo ranking (Sherlock, max>={min_bounty:g}):")
+            for r in rows:
+                s = r["signals"]
+                typer.echo(
+                    f"  keizo={r['keizo']:.3f}  up to ${r['max_bounty']:>10,.0f}  "
+                    f"{r['type']:>12s}  {r['title']}"
+                )
+                typer.echo(f"      fresh={s['fresh']:.2f} payout={s['payout']:.2f} open_gate={s['open_gate']:.0f}")
     if json_output:
         typer.echo(json.dumps(rows, indent=2))
 
