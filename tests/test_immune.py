@@ -291,3 +291,21 @@ def test_audit_evidence_guardian_needs_audit_context():
     assert "guardian" not in ev["audit_firms"]
     ev2 = _audit_evidence("", "Guardian audit report published by the team")
     assert "guardian" in ev2["audit_firms"]
+
+
+def test_cache_version_invalidates_stale_row_shape(monkeypatch, tmp_path):
+    # Regression (2026-09-30): the cache stored program dicts that predate the
+    # `_seg`/`_raw` inputs added for audit evidence. On reload those keys are
+    # absent, so evidence silently scored False and --verify-audits stopped
+    # filtering. Cached rows from a different shape must be discarded.
+    import json
+    from cli import cs_immune as m
+    cache = tmp_path / "c.json"
+    cache.write_text(json.dumps({"programs": [{"_slug": "x", "maxBounty": 1}]}))
+    monkeypatch.setattr(m, "_CACHE", cache)
+    monkeypatch.setattr(m, "_catalog", lambda: [])
+    # stale (no version key) -> nothing is treated as cached
+    assert m._load(refresh=False) == []
+    # current version -> reused
+    cache.write_text(json.dumps({"version": m._CACHE_VERSION, "programs": [{"_slug": "x", "maxBounty": 1}]}))
+    assert [p["_slug"] for p in m._load(refresh=False)] == ["x"]

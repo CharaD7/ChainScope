@@ -46,6 +46,7 @@ app = typer.Typer()
 _INDEX = "https://immunefi.com/bug-bounty/"
 _PAGE = "https://immunefi.com/bug-bounty/{slug}/information/"
 _CACHE = Path(_PARENT) / ".chainsource" / "immune_programs.json"
+_CACHE_VERSION = 2  # bump when _row() gains new inputs; old caches lack _seg/_raw
 _TTL = 24 * 3600
 _UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
 _RETRY = 4
@@ -229,7 +230,10 @@ def _load(refresh: bool = False) -> list[dict[str, typing.Any]]:
     if _CACHE.exists():
         try:
             payload = json.loads(_CACHE.read_text())
-            cached = {p["_slug"]: p for p in payload.get("programs", []) if "_slug" in p}
+            if payload.get("version") == _CACHE_VERSION:
+                cached = {p["_slug"]: p for p in payload.get("programs", []) if "_slug" in p}
+            else:
+                cached = {}  # stale shape: _seg/_raw absent, evidence would be wrong
             fresh_enough = (time.time() - _CACHE.stat().st_mtime) < _TTL
         except (json.JSONDecodeError, OSError):
             cached = {}
@@ -249,7 +253,7 @@ def _load(refresh: bool = False) -> list[dict[str, typing.Any]]:
         else:
             out.append(cached[slug])
     _CACHE.parent.mkdir(parents=True, exist_ok=True)
-    _CACHE.write_text(json.dumps({"fetched_at": int(time.time()), "programs": out}))
+    _CACHE.write_text(json.dumps({"version": _CACHE_VERSION, "fetched_at": int(time.time()), "programs": out}))
     return out
 
 
