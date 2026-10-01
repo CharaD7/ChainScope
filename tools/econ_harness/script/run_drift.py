@@ -51,15 +51,24 @@ def run(vault: str, asset: str, block: int, cycles: int, test: str) -> tuple[dic
                 "CYCLES": str(cycles)})
     if asset:
         env["TARGET_ASSET"] = asset
-    p = subprocess.run(["forge", "test", "--match-contract", "RoundingDriftTest",
-                        "--match-test", test, "-vv"],
-                       cwd=HARNESS, capture_output=True, text=True, timeout=1800, env=env)
-    return dict((f, int(v)) for _t, f, v in _LOG.findall(p.stdout + p.stderr)), p.stdout + p.stderr
+    combined = ""
+    parsed: dict[str, int] = {}
+    # one retry: the authenticated endpoint intermittently times out mid-sweep and
+    # an empty result reads as "no drift" when it means "never ran"
+    for attempt in range(2):
+        p = subprocess.run(["forge", "test", "--match-contract", "RoundingDriftTest",
+                            "--match-test", test, "-vv"],
+                           cwd=HARNESS, capture_output=True, text=True, timeout=1800, env=env)
+        combined = p.stdout + p.stderr
+        parsed = dict((f, int(v)) for _t, f, v in _LOG.findall(combined))
+        if parsed:
+            break
+    return parsed, combined
 
 
 def verdict(d: dict) -> tuple[str, str]:
     if not d:
-        return "UNKNOWN", "probe produced no output"
+        return "RPC-FAILED", "no output from two attempts; this is an endpoint failure, not a result"
     done = d.get("cycles_done", 0)
     net = d.get("net", 0)
     stopped = d.get("stopped", 0)

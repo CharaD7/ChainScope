@@ -6,6 +6,7 @@ import "forge-std/Test.sol";
 interface IERC20R {
     function balanceOf(address) external view returns (uint256);
     function approve(address, uint256) external returns (bool);
+    function allowance(address, address) external view returns (uint256);
 }
 
 interface IVaultR {
@@ -44,6 +45,8 @@ contract RoundingDriftTest is Test {
         bool stopped;
         uint256 vaultAssetsBefore;
         uint256 vaultAssetsAfter;
+        bytes revertReason;
+        uint256 lossEvents;
     }
 
     /// Returns false when unconfigured so the suite stays green with no TARGET_VAULT
@@ -62,26 +65,13 @@ contract RoundingDriftTest is Test {
         );
     }
 
-    /// One cycle: deposit `amount`, redeem every share minted, and return how
-    /// much came back. A vault with a minimum-deposit or withdrawal cap reverts
-    /// mid-loop; that is a property of the target, so it is reported rather than
-    /// allowed to abort the run.
-    /// public, not internal: it is invoked via `this.` so a revert is catchable
-    /// per-cycle instead of aborting the whole run. That makes it an EXTERNAL
-    /// call, so `msg.sender` here is the test contract and any prank applied by
-    /// the caller is already spent - every external call below is pranked
-    /// individually. Without that, the approval belongs to the test contract and
-    /// every cycle reverts with "ERC20: insufficient allowance", which is
-    /// indistinguishable from a vault that refuses to be cycled.
-    function cycle(address vault, address asset, uint256 amount) public returns (uint256 back) {
-        uint256 balBefore = IERC20R(asset).balanceOf(attacker);
-        vm.prank(attacker);
-        uint256 minted = IVaultR(vault).deposit(amount, attacker);
-        vm.prank(attacker);
-        IVaultR(vault).redeem(minted, attacker, attacker);
-        back = IERC20R(asset).balanceOf(attacker) - balBefore;
-    }
-
+    /// Runs the cycles inline rather than through a `this.cycle(...)` self-call.
+    ///
+    /// The self-call was the bug: it makes the cycle a separate frame whose
+    /// `msg.sender` is the test contract, and it turned a working deposit into a
+    /// zero-return. A focused diagnostic (DriftDiagnostic) showed the identical
+    /// sequence succeeding when written inline - deposit minted 1e18 shares - so
+    /// the fault was the indirection, not the target.
     function _run(address vault, address asset, uint256 amount, uint256 cycles)
         internal
         returns (Drift memory d)
@@ -94,14 +84,59 @@ contract RoundingDriftTest is Test {
         IERC20R(asset).approve(vault, type(uint256).max);
 
         for (uint256 i = 0; i < cycles; i++) {
-            try this.cycle(vault, asset, amount) returns (uint256 back) {
-                d.recovered += back;
-                d.paid += amount;
-                d.cyclesCompleted++;
+            uint256 balBefore = IERC20R(asset).balanceOf(attacker);
+            uint256 minted;
+            bool deposited = true;
+            vm.prank(attacker);
+            try IVaultR(vault).deposit(amount, attacker) returns (uint256 m) {
+                minted = m;
             } catch {
+                deposited = false;
+            }
+            if (!deposited || minted == 0) {
                 d.stopped = true;
                 break;
             }
+            bool redeemed = true;
+            uint256 gotBack;
+            vm.prank(attacker);
+            try IVaultR(vault).redeem(minted, attacker, attacker) returns (uint256 b) {
+                gotBack = b;
+            } catch (bytes memory reason) {
+                // A full redemption can be blocked by a withdrawal cap while
+                // partial exits still work, so a bare revert here is not proof the
+                // vault refuses to be cycled. Try halving before giving up, and
+                // fall back to whatever maxRedeem permits.
+                redeemed = false;
+                d.revertReason = reason;
+                uint256 half = minted / 2;
+                if (half > 0) {
+                    vm.prank(attacker);
+                    try IVaultR(vault).redeem(half, attacker, attacker) returns (uint256 b) {
+                        gotBack = b;
+                        redeemed = true;
+                        emit log_named_uint("PARTIAL redeem_shares", half);
+                        emit log_named_uint("PARTIAL returned     ", b);
+                    } catch {}
+                }
+            }
+            if (!redeemed) {
+                d.stopped = true;
+                break;
+            }
+            // Must not underflow. `balanceOf - balBefore` goes negative exactly
+            // when the depositor is worse off after a cycle - which is the
+            // finding - so an unchecked subtraction would panic at precisely the
+            // moment the harness had something to report.
+            uint256 balAfter = IERC20R(asset).balanceOf(attacker);
+            if (balAfter >= balBefore) {
+                d.recovered += balAfter - balBefore;
+            } else {
+                d.lossEvents++;
+                emit log_named_uint("CYCLE_LOSS returned", balBefore - balAfter);
+            }
+            d.paid += amount;
+            d.cyclesCompleted++;
         }
         d.vaultAssetsAfter = IVaultR(vault).totalAssets();
     }
@@ -112,7 +147,11 @@ contract RoundingDriftTest is Test {
         emit log_named_uint(string.concat("DRIFT_", tag, " recovered     "), d.recovered);
         emit log_named_int(string.concat("DRIFT_", tag, " net           "), int256(d.recovered) - int256(d.paid));
         emit log_named_uint(string.concat("DRIFT_", tag, " vault_delta   "), d.vaultAssetsAfter - d.vaultAssetsBefore);
+        emit log_named_uint(string.concat("DRIFT_", tag, " loss_events   "), d.lossEvents);
         emit log_named_uint(string.concat("DRIFT_", tag, " stopped       "), d.stopped ? 1 : 0);
+        if (d.revertReason.length > 0) {
+            emit log_named_bytes(string.concat("DRIFT_", tag, " revert_reason "), d.revertReason);
+        }
     }
 
     /// A single large cycle, repeated. Large enough to clear any minimum-deposit
