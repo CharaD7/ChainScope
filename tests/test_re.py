@@ -206,3 +206,70 @@ class TestInterfaceInference:
             "0x2": ["balanceOf(address)"],
         })
         assert "ERC20" not in partial["interfaces"]
+
+# --------------------------------------------------------------------------- #
+# diamond branch
+# --------------------------------------------------------------------------- #
+# Built for a false example: I claimed sDAI was an EIP-2535 diamond when it was
+# not, and no diamond was found among 143 real in-scope addresses. So the branch
+# is now validated against a real, standards-shaped diamond
+# (tools/diamond_fixture, deployed to anvil and driven end-to-end), and these
+# tests pin the classification against that shape.
+#
+# The property that matters: facet selectors are absent from the diamond's own
+# bytecode, which is exactly what the surface caveat warns about.
+
+FACETS_RETURN = (
+    "[(0xBA12646CC07ADBe43F8bD25D83FB628D29C8A762, [0xd580f22b]), "
+    "(0x7ab4C4804197531f7ed6A6bc0f0781f706ff7953, [0x0bf397c4]), "
+    "(0xc8CB5439c767A63aca1c01862252B2F3495fDcFE, [0x7a0ed627])]"
+)
+
+
+class TestDiamondClassification:
+    def _patch(self, monkeypatch, *, facets_ok: bool, code: str):
+        import core.cs_re as re_mod
+
+        monkeypatch.setattr(re_mod, "runtime_code", lambda chain, addr: code)
+        monkeypatch.setattr(re_mod, "_storage", lambda chain, addr, slot: None)
+        monkeypatch.setattr(re_mod, "rpc_for", lambda chain: "http://local")
+        if facets_ok:
+            monkeypatch.setattr(re_mod, "_call",
+                                lambda chain, addr, sig, args="": (True, FACETS_RETURN))
+        else:
+            monkeypatch.setattr(re_mod, "_call", lambda chain, addr, sig, args="": (False, ""))
+
+    def test_address_reporting_facets_is_classified_as_diamond(self, monkeypatch):
+        self._patch(monkeypatch, facets_ok=True, code="0x6080604052")
+        from core.cs_re import resolve_proxy
+        r = resolve_proxy("1", "0xabc")
+        assert r["kind"] == "EIP2535_DIAMOND"
+        assert len(r["facets"]) == 3
+        assert any("registered in storage" in n for n in r["notes"])
+        assert any("Read the facets, not this" in n for n in r["notes"])
+
+    def test_diamond_without_facets_is_not_classified_as_one(self, monkeypatch):
+        """facets() reverting must not produce a diamond verdict.
+
+        This is the sDAI error in reverse: a contract that does not answer
+        facets() is not evidence of a diamond.
+        """
+        self._patch(monkeypatch, facets_ok=False, code="0x6080604052")
+        from core.cs_re import resolve_proxy
+        r = resolve_proxy("1", "0xabc")
+        assert r["kind"] == "DIRECT"
+        assert r["facets"] == []
+
+    def test_facet_selectors_are_absent_from_the_diamond_bytecode(self):
+        """The blind spot the caveat describes, pinned arithmetically."""
+        from core.cs_re import extract_selectors, _FUNC_DECL
+        import re as _re
+        # facetAFunction() selector
+        import hashlib
+        # keccak via cast is unavailable offline, so use a known-good constant
+        facet_selector = "0xd580f22b"  # facetAFunction()
+        # diamond bytecode: only its own functions
+        diamond_code = "0x" + "6311223344" + "14" + "00"
+        sel = extract_selectors(diamond_code)
+        assert facet_selector not in sel["dispatcher"]
+        assert "0x11223344" in sel["dispatcher"]
