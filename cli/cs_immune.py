@@ -48,6 +48,23 @@ _PAGE = "https://immunefi.com/bug-bounty/{slug}/information/"
 _CACHE = Path(_PARENT) / ".chainsource" / "immune_programs.json"
 _CACHE_VERSION = 2  # bump when _row() gains new inputs; old caches lack _seg/_raw
 _TTL = 24 * 3600
+
+# --- submission policy ------------------------------------------------------
+# Engagement rules, not facts about the world: we only submit to programs that
+# charge nothing to file a report, and only chase pools up to a $100k ceiling.
+# Encoding them here means a too-big or paid program can never reach the top of a
+# ranking. Two were lost to exactly this before it was a gate: a $250 submission
+# fee (Midas/Sherlock 122) and a $250k pool (Stacks) that was also Rust.
+SUBMISSION_FEE_MAX_USD = 0
+MAX_SUBMITTABLE_BOUNTY_USD = 100_000.0
+
+# Severity floor. Where a Medium pays less than this, a High or Medium is not
+# worth the hunt and the target has to be a Critical - so it is recorded per
+# program rather than left as tribal knowledge. A $100k pool where Critical is
+# the top tier and Medium is a rounding error is a Critical-only target, and
+# reading it as "a $100k opportunity" is how effort gets spent on High findings
+# that pay almost nothing.
+MIN_MEDIUM_PAYOUT_USD = 10_000.0
 _UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
 _RETRY = 4
 
@@ -466,6 +483,77 @@ def _program_status(raw: str) -> dict[str, typing.Any]:
     }
 
 
+def severity_floor(critical: float | None, medium: float | None) -> dict[str, typing.Any]:
+    """What is the lowest severity worth hunting for here?
+
+    Where a Medium pays under $10k, a High or Medium is not worth the hunt and
+    the target has to be a Critical. A `$100k` pool where Critical is the top
+    tier and Medium is a rounding error is a Critical-only target, and reading it
+    as "a $100k opportunity" is how effort gets spent on High findings that pay
+    almost nothing.
+
+    Returns the floor plus the reasoning, and reports UNKNOWN rather than
+    guessing when the tier table could not be parsed - a missing payout is not
+    evidence of a small one.
+    """
+    if medium is None:
+        return {"floor": "UNKNOWN", "reason": "no Medium tier parsed", "crit_worth_chasing": False}
+    if medium < MIN_MEDIUM_PAYOUT_USD:
+        return {
+            "floor": "CRIT",
+            "reason": f"Medium pays ${medium:,.0f} < ${MIN_MEDIUM_PAYOUT_USD:,.0f}",
+            "crit_worth_chasing": bool(critical and critical >= MAX_SUBMITTABLE_BOUNTY_USD * 0.5),
+        }
+    return {
+        "floor": "HIGH",
+        "reason": f"Medium pays ${medium:,.0f}",
+        "crit_worth_chasing": bool(critical and critical >= MAX_SUBMITTABLE_BOUNTY_USD * 0.5),
+    }
+
+
+def submit_eligibility(row: dict[str, typing.Any]) -> dict[str, typing.Any]:
+    """Can we actually file at this program?
+
+    Three independent ways a program is unusable, all of which have cost time:
+      * paused - still lists scope, still fetches clean, so it looks healthy;
+      * an entry fee - a $250 filing fee on Sherlock 122 made a real finding
+        unsubmittable, and the fee is not visible in the scope payload;
+      * a pool above our ceiling - a bigger number is not a better target if we
+        are not going to chase it.
+
+    Returned as explicit reasons rather than a bare boolean so a rejected program
+    says which rule excluded it.
+    """
+    reasons: list[str] = []
+    status = row.get("status_code") or (row.get("status") or {}).get("status", "UNKNOWN")
+    if status == "PAUSED":
+        reasons.append("PAUSED")
+    fee = row.get("submission_fee_usd")
+    if fee is not None and fee > SUBMISSION_FEE_MAX_USD:
+        reasons.append(f"SUBMISSION_FEE_${fee:g}")
+    bounty = row.get("max_bounty")
+    # The ceiling must be compared against the TOP TIER, not maxBounty. bobanetwork
+    # reports maxBounty under $100k while its Critical tier is $1,000,000, so a
+    # maxBounty-based rule both waves through and blocks real programs for the
+    # wrong reason. Take whichever is higher - the payout we would actually be
+    # chasing.
+    crit = row.get("critical_payout")
+    ceiling_basis = max([v for v in (bounty, crit) if isinstance(v, (int, float))], default=None)
+    if ceiling_basis is None or ceiling_basis > MAX_SUBMITTABLE_BOUNTY_USD:
+        shown = f"${ceiling_basis:,.0f}" if ceiling_basis else "unknown"
+        reasons.append(f"POOL_OVER_${MAX_SUBMITTABLE_BOUNTY_USD:,.0f}:{shown}")
+    return {
+        "submittable": not reasons,
+        "reasons": reasons,
+        "status": status,
+        "max_bounty": bounty,
+        "critical_payout": crit,
+        "ceiling_basis": ceiling_basis,
+        "submission_fee_usd": fee,
+        "ceiling_usd": MAX_SUBMITTABLE_BOUNTY_USD,
+    }
+
+
 def _row(p: dict[str, typing.Any]) -> dict[str, typing.Any]:
     seg = p.get("_seg") or ""
     audits = p.get("audits") or []
@@ -493,6 +581,9 @@ def _row(p: dict[str, typing.Any]) -> dict[str, typing.Any]:
         "tiers": tiers,
         "critical_payout": critical.get("payout"),
         "critical_payout_stale": bool(claimed is None and critical.get("payout")),
+        "high_payout": high.get("payout"),
+        "medium_payout": tiers.get("Medium", {}).get("payout"),
+        "low_payout": tiers.get("Low", {}).get("payout"),
         "high_payout": high.get("payout"),
         "updated": updated,
         "updated_date": (p.get("updatedDate") or "")[:10],
@@ -681,6 +772,21 @@ def _keizo(p: dict[str, typing.Any], now: float) -> dict[str, typing.Any]:
         "status": status,
         "live": status == "LIVE",
     }
+    # Engagement rules applied last, so a program we cannot file at can never rank
+    # above one we can, however good its other signals look.
+    elig = submit_eligibility(row)
+    row["submittable"] = elig["submittable"]
+    row["submit_reasons"] = elig["reasons"]
+
+    # Severity floor, computed once so the decision is testable without a
+    # network fetch or a synthetic program page.
+    floor = severity_floor(row.get("critical_payout"), row.get("medium_payout"))
+    row["min_viable_severity"] = floor["floor"]
+    row["severity_floor_reason"] = floor["reason"]
+    row["crit_worth_chasing"] = floor["crit_worth_chasing"]
+
+    if not elig["submittable"]:
+        row["keizo"] = 0.0
     return row
 
 

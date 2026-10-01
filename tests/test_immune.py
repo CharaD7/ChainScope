@@ -16,6 +16,8 @@ import json
 import pytest
 
 from cli.cs_immune import (
+    severity_floor,
+    submit_eligibility,
     _program_status,
     _keizo,
     _audits,
@@ -379,3 +381,114 @@ def test_unknown_status_is_capped():
          "updated": "2026-09-01", "bounty": {"maxBounty": 5_000_000, "primacy": "primacy_of_impact",
                                              "poc": "1", "kyc": "0", "assets": []}}
     assert _keizo(p, 1.0)["keizo"] <= 0.05
+
+
+# --------------------------------------------------------------------------- #
+# submission eligibility: $0 fee, pool <= $100k, and live
+# --------------------------------------------------------------------------- #
+# Two were lost to this before it was enforced: Sherlock 122 charges $250 to file
+# a report (a real finding, unsubmittable), and Stacks carried a $250k pool we
+# were never going to chase - and was Rust besides.
+
+def _elig(**kw):
+    base = {"status_code": "LIVE", "max_bounty": 40_000.0, "submission_fee_usd": 0}
+    base.update(kw)
+    return submit_eligibility(base)
+
+
+def test_submittable_when_live_under_ceiling_and_free():
+    e = _elig()
+    assert e["submittable"] is True
+    assert e["reasons"] == []
+
+
+def test_paused_is_not_submittable():
+    e = _elig(status_code="PAUSED")
+    assert e["submittable"] is False
+    assert "PAUSED" in e["reasons"]
+
+
+def test_submission_fee_blocks():
+    e = _elig(submission_fee_usd=250)
+    assert e["submittable"] is False
+    assert any("SUBMISSION_FEE" in r for r in e["reasons"])
+
+
+def test_pool_over_ceiling_blocks():
+    e = _elig(max_bounty=250_000.0)
+    assert e["submittable"] is False
+    assert any("POOL_OVER" in r for r in e["reasons"])
+
+
+def test_pool_exactly_at_ceiling_is_allowed():
+    assert _elig(max_bounty=100_000.0)["submittable"] is True
+
+
+def test_unknown_pool_is_not_submittable():
+    """An unpriced program is not assumed affordable."""
+    assert _elig(max_bounty=None)["submittable"] is False
+
+
+def test_keizo_zeroes_ineligible_programs():
+    p = {"_slug": "big", "status": {"status": "LIVE"}, "maxBounty": 250_000,
+         "updated": "2026-09-01",
+         "bounty": {"maxBounty": 250_000, "primacy": "primacy_of_impact",
+                    "poc": "1", "kyc": "0", "assets": []}}
+    row = _keizo(p, 1.0)
+    assert row["keizo"] == 0.0
+    assert row["submittable"] is False
+    assert any("POOL_OVER" in r for r in row["submit_reasons"])
+
+
+def test_keizo_keeps_score_for_eligible_program():
+    p = {"_slug": "ok", "status": {"status": "LIVE"}, "maxBounty": 40_000,
+         "updated": "2026-09-01",
+         "bounty": {"maxBounty": 40_000, "primacy": "primacy_of_impact",
+                    "poc": "1", "kyc": "0", "assets": []}}
+    row = _keizo(p, 1.0)
+    assert row["keizo"] > 0
+    assert row["submittable"] is True
+
+
+# --------------------------------------------------------------------------- #
+# severity floor: where a Medium pays under $10k, only a Critical is worth it
+# --------------------------------------------------------------------------- #
+
+def test_severity_floor_crit_when_medium_cheap():
+    r = severity_floor(100_000.0, 2_500.0)
+    assert r["floor"] == "CRIT"
+    assert "2,500" in r["reason"]
+    assert r["crit_worth_chasing"] is True
+
+
+def test_severity_floor_high_when_medium_pays_well():
+    assert severity_floor(500_000.0, 40_000.0)["floor"] == "HIGH"
+
+
+def test_severity_floor_unknown_without_tier_data():
+    """A missing payout is not evidence of a small one."""
+    r = severity_floor(None, None)
+    assert r["floor"] == "UNKNOWN"
+    assert r["crit_worth_chasing"] is False
+
+
+def test_severity_floor_at_exactly_10k_is_high():
+    assert severity_floor(100_000.0, 10_000.0)["floor"] == "HIGH"
+
+
+def test_small_critical_is_not_worth_chasing():
+    r = severity_floor(20_000.0, 1_000.0)
+    assert r["floor"] == "CRIT"
+    assert r["crit_worth_chashing"] if False else r["crit_worth_chasing"] is False
+
+
+def test_ceiling_uses_critical_tier_not_maxbounty():
+    """Regression: bobanetwork reports maxBounty under $100k but its Critical tier
+    is $1,000,000. Comparing against maxBounty waves a real $1M target through on
+    the wrong reasoning, and would block it outright if the tiers ever lined up
+    the other way. The ceiling basis must be the top tier."""
+    e = submit_eligibility({"status_code": "LIVE", "submission_fee_usd": 0,
+                            "max_bounty": 100_000.0, "critical_payout": 1_000_000.0})
+    assert e["submittable"] is False
+    assert e["ceiling_basis"] == 1_000_000.0
+    assert any("POOL_OVER" in r for r in e["reasons"])
