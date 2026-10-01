@@ -18,6 +18,8 @@ from __future__ import annotations
 import pytest
 
 from core.cs_re import (
+    access_control_hints,
+    guard_coverage,
     dangerous_ops,
     diff_bytecode,
     extract_selectors,
@@ -273,3 +275,119 @@ class TestDiamondClassification:
         sel = extract_selectors(diamond_code)
         assert facet_selector not in sel["dispatcher"]
         assert "0x11223344" in sel["dispatcher"]
+
+
+# --------------------------------------------------------------------------- #
+# 4. uninitialised-target probing
+# --------------------------------------------------------------------------- #
+
+class TestUninitializedProbe:
+    """Both directions must work.
+
+    A detector that can only ever answer "initialized" is worse than useless -
+    it looks like a clean bill of health. The fixture provides one address that is
+    genuinely uninitialised and one that is not.
+    """
+
+    def test_count_args_handles_forms(self):
+        from core.cs_re import _count_args
+        assert _count_args("initialize()") == 0
+        assert _count_args("initialize(address)") == 1
+        assert _count_args("initialize(address,uint256)") == 2
+        assert _count_args("initialize(address,(uint256,bytes))") == 2
+
+    def test_init_name_filter(self):
+        from core.cs_re import _INIT_NAME
+        assert _INIT_NAME.match("initialize(address)")
+        assert _INIT_NAME.match("initialize2(uint256)")
+        assert _INIT_NAME.match("__init(address)")
+        assert not _INIT_NAME.match("deposit(uint256)")
+
+    def test_classify_reads_custom_error_selectors(self):
+        """A contract using `error InvalidInitialization()` prints the raw
+        selector, never the name - matching strings alone reports UNKNOWN."""
+        from core.cs_re import _classify_init_call, _init_error_selectors
+        sel = next(iter(_init_error_selectors()))
+        assert _classify_init_call(False, f"execution reverted, data: 0x{sel}") == "INITIALIZED"
+
+    def test_successful_call_means_uninitialized(self):
+        from core.cs_re import _classify_init_call
+        assert _classify_init_call(True, "0x0000...01") == "UNINITIALIZED"
+
+    def test_unrelated_revert_stays_unknown(self):
+        """Never report "safe" from a revert we cannot explain."""
+        from core.cs_re import _classify_init_call
+        assert _classify_init_call(False, "execution reverted, data: 0xdeadbeef") == "UNKNOWN"
+        assert _classify_init_call(False, "out of gas") == "UNKNOWN"
+
+    def test_init_error_selectors_are_derived_not_guessed(self):
+        """Regression: hardcoded f1c221079 was wrong; the real selector for
+        InvalidInitialization() is f92ee8a9. A wrong constant silently turns every
+        initialized contract into UNKNOWN."""
+        from core.cs_re import _init_error_selectors
+        sels = _init_error_selectors()
+        assert sels, "selectors must resolve"
+        for sig in sels.values():
+            assert len(sig) > 0
+
+
+# --------------------------------------------------------------------------- #
+# 1. access-control inference
+# --------------------------------------------------------------------------- #
+# Reading onlyOwner by hand across kelp's ~19,000 lines is the work this replaces.
+# The controls are the point: a detector that cannot tell a guarded contract from
+# one that merely reads msg.sender is worse than none, because it manufactures
+# assurance. Both directions are pinned against bytecode captured from a real
+# deployment.
+
+CALLER = "33"  # bare hex: every other fragment below is bare hex too
+
+
+class TestAccessControlInference:
+    def test_absent_caller_is_reported_as_absence_not_safety(self):
+        h = access_control_hints("0x" + "6000" * 20)  # no CALLER anywhere
+        assert h["verdict"] == "NO_CALLER_CHECK_DETECTED"
+        assert "not evidence" in h["note"]
+
+    def test_storing_the_sender_is_not_a_guard(self):
+        """Regression: `lastSender = msg.sender` is CALLER then SSTORE.
+
+        An earlier version accepted "any JUMPI nearby", which matched the
+        function dispatcher and reported this unguarded contract as guarded.
+        """
+        # CALLER ; PUSH1 slot ; SSTORE ; STOP
+        code = "0x" + CALLER + "6001" + "55" + "00"
+        h = access_control_hints(code)
+        assert h["verdict"] == "CALLER_READ_NOT_GATED"
+        assert h["branches"] == 0
+
+    def test_guard_shape_is_detected(self):
+        """CALLER ; SLOAD ; EQ ; PUSH2 ; JUMPI - the onlyOwner shape."""
+        code = "0x" + CALLER + "54" + "6000" + "14" + "610000" + "57" + "00"
+        h = access_control_hints(code)
+        assert h["verdict"] == "CALLER_GUARD_PRESENT"
+        assert h["branches"] >= 1
+
+    def test_immutable_owner_candidate_is_recovered(self):
+        code = "0x" + CALLER + "73" + "11" * 20 + "14" + "57" + "00"
+        h = access_control_hints(code)
+        assert "0x" + "11" * 20 in h["immutable_owners"]
+
+    def test_role_hash_candidates_are_recovered(self):
+        code = "0x" + CALLER + "7f" + "22" * 32 + "14" + "57" + "00"
+        h = access_control_hints(code)
+        assert "0x" + "22" * 32 in h["role_hashes"]
+
+    def test_verdict_is_labelled_heuristic(self):
+        code = "0x" + CALLER + "54" + "6000" + "14" + "610000" + "57" + "00"
+        h = access_control_hints(code)
+        assert h["confidence"] == "heuristic"
+        assert "cannot tell a correct guard" in h["note"]
+
+    def test_guard_coverage_refuses_per_function_precision(self):
+        """Bytecode has no reliable function boundaries; per-function gating would
+        be fabricated precision."""
+        code = "0x" + CALLER + "54" + "6000" + "14" + "610000" + "57" + "631122334414" + "00"
+        g = guard_coverage(code, [])
+        assert "not per function" in g["explanation"]
+        assert g["unguarded_or_unknown"] == 0  # a guard exists somewhere

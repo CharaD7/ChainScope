@@ -727,3 +727,280 @@ def compare_source_to_deployed(chain: str, address: str, source_root: Path,
 def _strip_comments(text: str) -> str:
     text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
     return re.sub(r"//[^\n]*", "", text)
+
+
+# --------------------------------------------------------------------------- #
+# 4. uninitialised-proxy / uninitialised-implementation detection
+# --------------------------------------------------------------------------- #
+
+_INIT_NAME = re.compile(r"^(initialize|init|setUp|setup|__init|reinitialize)", re.I)
+# Revert payloads that prove an Initializable guard already fired. Matching the
+# rendered STRING is not enough: a contract declaring `error InvalidInitialization()`
+# makes `cast call` print the raw 4-byte selector, never the name. Both forms are
+# checked, because "the call reverted for an unrelated reason" must not be
+# reported as "safe" - that is precisely how a probe would cry wolf.
+_INIT_ERRORS = (
+    "already initialized", "invalid initialization", "not initializing",
+    "initialization", "initialized",
+)
+# OpenZeppelin Initializable guard errors. The selectors are DERIVED at runtime
+# via `cast sig` rather than hardcoded: an earlier revision hardcoded
+# f1c221079 for InvalidInitialization() when the real value is f92ee8a9, and a
+# wrong constant silently turns every initialized contract into UNKNOWN. Deriving
+# them removes the possibility of being wrong from memory.
+_INIT_ERROR_SIGS = ("InvalidInitialization()", "NotInitializing()")
+_INIT_ERROR_SELECTORS_CACHE: dict[str, str] | None = None
+
+
+def _init_error_selectors() -> dict[str, str]:
+    global _INIT_ERROR_SELECTORS_CACHE
+    if _INIT_ERROR_SELECTORS_CACHE is None:
+        out: dict[str, str] = {}
+        for sig in _INIT_ERROR_SIGS:
+            ok, sel = _cast(["sig", sig], timeout=45)
+            if ok and sel.startswith("0x") and len(sel) == 10:
+                out[sel[2:].lower()] = sig
+        _INIT_ERROR_SELECTORS_CACHE = out
+    return _INIT_ERROR_SELECTORS_CACHE
+
+
+def initializer_selectors(code_hex: str, resolve: bool = True) -> list[dict[str, t.Any]]:
+    """Selectors that look like initializer entrypoints.
+
+    `initialize*` is the OpenZeppelin convention but the name is not the point -
+    what matters is whether the CALL succeeds, which is probed separately. Any
+    selector whose resolved name matches is a candidate worth trying.
+    """
+    sel = extract_selectors(code_hex)
+    out: list[dict[str, t.Any]] = []
+    if resolve and sel["dispatcher"]:
+        res = resolve_selectors(sel["dispatcher"])
+        for s, names in res.items():
+            for n in names:
+                if _INIT_NAME.match(n):
+                    out.append({"selector": s, "signature": n})
+    return out
+
+
+def uninitialized_probe(chain: str, address: str, *, max_args: int = 10) -> dict[str, t.Any]:
+    """Is this address's initializer still callable?
+
+    An uninitialised proxy or implementation can be taken over by anyone:
+    calling `initialize(yourself)` makes you owner/admin. This is a Critical when
+    it works and undetectable from source that is not the deployed code, so it is
+    worth probing rather than assuming.
+
+    Method: call each initializer-looking selector with dummy address arguments
+    and read WHY it failed. OZ's guard reverts with "Initializable: contract is
+    already initialized" - that specific revert is proof the guard fired and the
+    target is safe. A call that SUCCEEDS is proof the other way and is reported
+    loudly. Anything else is UNKNOWN, because guessing "safe" from an unrelated
+    revert is exactly the error this whole module keeps correcting.
+
+    Note this is an `eth_call`, so it never sends a transaction.
+    """
+    try:
+        code = runtime_code(chain, address)
+    except REError as exc:
+        return {"address": address, "verdict": "UNREACHABLE", "reason": str(exc)}
+
+    impls = resolve_proxy(chain, address).get("implementations") or []
+    targets = [address] + list(impls)
+
+    results: list[dict[str, t.Any]] = []
+    overall = "NO_INITIALIZER_FOUND"
+
+    for tgt in targets:
+        try:
+            tcode = runtime_code(chain, tgt)
+        except REError:
+            continue
+        for cand in initializer_selectors(tcode, resolve=True):
+            sig, sel = cand["signature"], cand["selector"]
+            nargs = _count_args(sig)
+            if nargs is None or nargs > max_args:
+                continue
+            dummy = "0x1111111111111111111111111111111111111111 " * nargs
+            ok, out = _call(chain, tgt, sig, dummy.strip())
+            verdict = _classify_init_call(ok, out)
+            results.append({
+                "address": tgt, "selector": sel, "signature": sig,
+                "args": nargs, "call_succeeded": ok, "verdict": verdict,
+                "output": out[:120] if out else None,
+            })
+            if verdict == "UNINITIALIZED":
+                overall = "UNINITIALIZED"
+            elif verdict == "INITIALIZED" and overall != "UNINITIALIZED":
+                overall = "INITIALIZED"
+            elif overall == "NO_INITIALIZER_FOUND":
+                overall = "UNKNOWN"
+
+    if not results:
+        overall = "NO_INITIALIZER_FOUND"
+    return {
+        "address": address,
+        "verdict": overall,
+        "probes": results,
+        "caveat": (
+            "eth_call only; nothing is submitted. A successful call proves an "
+            "uninitialised target. An unrelated revert is UNKNOWN, not safe."
+        ),
+    }
+
+
+def _count_args(sig: str) -> int | None:
+    """Count top-level parameters, respecting nesting.
+
+    Naive comma counting breaks on tuple/array arguments - `initialize(address,
+    (uint256,bytes))` counts 3 instead of 2, which would build wrong calldata and
+    make the probe answer something unrelated.
+    """
+    m = re.match(r"^[^(]+\((.*)\)$", sig)
+    if not m:
+        return None
+    inner = m.group(1).strip()
+    if not inner:
+        return 0
+    depth = 0
+    count = 1
+    for ch in inner:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            count += 1
+    return count
+
+
+def _classify_init_call(ok: bool, out: str) -> str:
+    """Decide what a failed initializer call actually proved."""
+    if ok:
+        return "UNINITIALIZED"
+    low = (out or "").lower()
+    # a custom error renders as raw revert data, e.g. "data: 0xf1c221079"
+    m = re.search(r"0x([0-9a-f]{8})", low)
+    if m and m.group(1) in _init_error_selectors():
+        return "INITIALIZED"
+    # Error(string) renders with the string visible in cast output
+    if any(e in low for e in _INIT_ERRORS):
+        return "INITIALIZED"
+    return "UNKNOWN"
+
+
+# --------------------------------------------------------------------------- #
+# 1. access-control inference from control flow
+# --------------------------------------------------------------------------- #
+# Reading `onlyOwner` by hand across kelp's ~19,000 lines is exactly the work this
+# is meant to remove. The signal is the SHAPE of a caller-identity check, not its
+# source-level name, because no name survives compilation.
+#
+# Recognised shapes:
+#   CALLER near an equality/branch -> a msg.sender check exists
+#   PUSH20 immutables compared against CALLER -> an immutable owner
+#   PUSH32 role hashes near CALLER comparisons -> AccessControl-style roles
+#   CALLER present but never branched on -> caller is read but not gated (weaker)
+#
+# This is a HEURISTIC and is reported as such: it says a guard looks present, not
+# that it is correct or complete. A missed guard is the dangerous direction, so
+# "no guard detected" is stated as absence of evidence, never as "unprotected".
+
+OP_CALLER = 0x33
+OP_JUMPI = 0x57
+OP_EQ = 0x14
+OP_SUB = 0x03
+OP_REVERT = 0xFD
+ERR_SELECTOR = 0x08C379A0  # Error(string)
+
+
+def _is_push(op: int) -> bool:
+    return 0x60 <= op <= 0x7F
+
+
+def access_control_hints(code_hex: str, *, context: int = 10) -> dict[str, t.Any]:
+    """Infer caller-identity guards from bytecode shape.
+
+    Returns evidence, not a verdict: which opcodes appeared, where, and which
+    candidate owners/roles were seen near a CALLER comparison.
+    """
+    ops = [(op, data) for op, data in iter_opcodes(code_hex)]
+    callers = [i for i, (op, _) in enumerate(ops) if op == OP_CALLER]
+    if not callers:
+        return {
+            "caller_checks": 0,
+            "branches": 0,
+            "immutable_owners": [],
+            "role_hashes": [],
+            "verdict": "NO_CALLER_CHECK_DETECTED",
+            "confidence": "none",
+            "note": "absence of evidence, not evidence of an unguarded contract",
+        }
+
+    branched = 0
+    immutable_owners: list[str] = []
+    role_hashes: list[str] = []
+
+    for i in callers:
+        window = ops[i + 1:i + context]
+        # A real guard is `CALLER` compared against a value it was stored with,
+        # then conditionally jumping:
+        #     CALLER ; SLOAD ownerSlot (or PUSH20 immutable) ; EQ ; PUSH2 revert ; JUMPI
+        #
+        # Merely reading the caller (`lastSender = msg.sender`) is CALLER then
+        # SSTORE with no comparison, and must NOT be counted. An earlier version
+        # accepted "any JUMPI nearby", which matched the function dispatcher
+        # instead and reported that unguarded contract as guarded - the dangerous
+        # direction, because it manufactures false assurance.
+        has_cmp = any(op in (OP_EQ, OP_SUB) for op, _ in window)
+        has_source = any(op == 0x54 or op == 0x73 for op, _ in window)  # SLOAD / PUSH20
+        has_branch = any(op == OP_JUMPI for op, _ in window)
+        stored_directly = bool(window) and window[0][0] == 0x55        # CALLER ; SSTORE
+        if has_cmp and (has_branch or has_source) and not stored_directly:
+            branched += 1
+        for op, data in window:
+            if op == 0x73 and len(data) == 40:      # PUSH20 -> immutable address
+                immutable_owners.append("0x" + data.lower())
+            elif op == 0x7F and len(data) == 64:    # PUSH32 -> role hash / storage key
+                role_hashes.append("0x" + data.lower())
+
+    immutable_owners = sorted(set(immutable_owners))
+    role_hashes = sorted(set(role_hashes))
+
+    if branched:
+        verdict, confidence = "CALLER_GUARD_PRESENT", "heuristic"
+    else:
+        verdict, confidence = "CALLER_READ_NOT_GATED", "low"
+
+    return {
+        "caller_checks": len(callers),
+        "branches": branched,
+        "immutable_owners": immutable_owners[:8],
+        "role_hashes": role_hashes[:8],
+        "error_selector_present": ERR_SELECTOR in opcode_histogram(code_hex),
+        "verdict": verdict,
+        "confidence": confidence,
+        "note": "shape-based heuristic; it cannot tell a correct guard from an incomplete one",
+    }
+
+
+def guard_coverage(code_hex: str, signatures: list[str]) -> dict[str, t.Any]:
+    """Annotate a function list with whether a caller guard appears near it.
+
+    Function boundaries cannot be recovered exactly from bytecode alone, so this
+    attributes guards to the WHOLE contract and to each selector's vicinity, and
+    reports the result as an upper bound on which functions are gated. Reporting a
+    per-function verdict here would be a fabricated precision.
+    """
+    overall = access_control_hints(code_hex)
+    sel = extract_selectors(code_hex)
+    return {
+        "contract": overall,
+        "selector_count": len(sel["dispatcher"]),
+        "gated_selectors": len(sel["dispatcher"]) if overall["branches"] else 0,
+        "unguarded_or_unknown": 0 if overall["branches"] else len(sel["dispatcher"]),
+        "explanation": (
+            "Attributed per contract, not per function: bytecode does not carry "
+            "reliable function boundaries. A non-zero `gated_selectors` means a "
+            "caller guard exists SOMEWHERE, not that any particular selector is safe."
+        ),
+    }

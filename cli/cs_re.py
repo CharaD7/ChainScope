@@ -209,3 +209,62 @@ def compare_source_cmd(
         for sel, names in list(r.get("only_in_deployed_resolved", {}).items())[:20]:
             if names:
                 typer.echo(f"    {sel} -> {', '.join(names)}")
+
+
+@app.command(name="uninit")
+def uninit_cmd(
+    address: str = typer.Argument(...),
+    chain: str = typer.Option("1", "--chain"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    """Probe whether an initializer is still callable (takeover risk).
+
+    An uninitialised proxy or implementation can be claimed by anyone: calling
+    `initialize(you)` makes you owner. eth_call only - nothing is submitted.
+    """
+    load_dotenv()
+    try:
+        r = cs_re.uninitialized_probe(chain, address)
+    except cs_re.REError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(2)
+    if json_output:
+        typer.echo(json.dumps(r, indent=2, default=str))
+        return
+    typer.echo(f"address : {r['address']}")
+    typer.echo(f"verdict : {r['verdict']}")
+    for p in r.get("probes", []):
+        typer.echo(f"  {p['signature']:<28} args={p['args']:<3} call_ok={p['call_succeeded']} -> {p['verdict']}")
+    typer.echo(f"caveat  : {r.get('caveat', '')}")
+
+
+@app.command(name="access")
+def access_cmd(
+    address: str = typer.Argument(...),
+    chain: str = typer.Option("1", "--chain"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    """Infer caller-identity guards from bytecode shape.
+
+    Replaces reading `onlyOwner` by hand across a large codebase. Shape-based and
+    explicitly a heuristic: it can say a guard looks present, never that it is
+    correct, and "no guard detected" is absence of evidence.
+    """
+    load_dotenv()
+    try:
+        code = cs_re.runtime_code(chain, address)
+    except cs_re.REError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(2)
+    h = cs_re.access_control_hints(code)
+    if json_output:
+        typer.echo(json.dumps(h, indent=2, default=str))
+        return
+    typer.echo(f"address         : {address}")
+    typer.echo(f"verdict         : {h['verdict']}  (confidence: {h['confidence']})")
+    typer.echo(f"caller reads    : {h['caller_checks']}   branches: {h['branches']}")
+    if h["immutable_owners"]:
+        typer.echo(f"immutable owners: {h['immutable_owners'][:4]}")
+    if h["role_hashes"]:
+        typer.echo(f"role/storage keys: {h['role_hashes'][:4]}")
+    typer.echo(f"note            : {h['note']}")

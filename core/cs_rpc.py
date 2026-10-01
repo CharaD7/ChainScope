@@ -30,13 +30,19 @@ PUBLIC_FALLBACK = {
     "43114": "https://avalanche-c-chain-rpc.publicnode.com",
 }
 
-# env var consulted per chain, highest priority first
+# Env vars consulted per chain, highest priority first.
+#
+# RPC_* is checked BEFORE ALCHEMY_*: an explicit per-run override must beat a
+# value loaded from .env. With the order the other way round, exporting
+# RPC_MAINNET=http://127.0.0.1:8545 while a populated .env exists silently
+# sends every "local" query to mainnet - which returns empty code rather than an
+# error, so it fails as a confusing wrong answer instead of an obvious failure.
 AUTH_ENV = {
-    "1": ("ALCHEMY_MAINNET", "RPC_MAINNET"),
-    "42161": ("ALCHEMY_ARBITRUM", "RPC_ARBITRUM"),
-    "10": ("ALCHEMY_OPTIMISM", "RPC_OPTIMISM"),
-    "137": ("ALCHEMY_POLYGON", "RPC_POLYGON"),
-    "8453": ("ALCHEMY_BASE", "RPC_BASE"),
+    "1": ("RPC_MAINNET", "ALCHEMY_MAINNET"),
+    "42161": ("RPC_ARBITRUM", "ALCHEMY_ARBITRUM"),
+    "10": ("RPC_OPTIMISM", "ALCHEMY_OPTIMISM"),
+    "137": ("RPC_POLYGON", "ALCHEMY_POLYGON"),
+    "8453": ("RPC_BASE", "ALCHEMY_BASE"),
 }
 
 _ENV_NAME = {
