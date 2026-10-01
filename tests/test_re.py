@@ -391,3 +391,186 @@ class TestAccessControlInference:
         g = guard_coverage(code, [])
         assert "not per function" in g["explanation"]
         assert g["unguarded_or_unknown"] == 0  # a guard exists somewhere
+
+
+# --------------------------------------------------------------------------- #
+# 3 + 5. event recovery and dormant paths
+# --------------------------------------------------------------------------- #
+# Event names often describe a contract's function better than its function
+# names do - on kelp's withdrawal manager they surfaced
+# EmergencyWithdrawFromAave, InstantWithdrawalFeeCollected and AssetUnlocked
+# without reading a line of source.
+
+class TestEventRecovery:
+    def test_push32_before_log_is_a_topic_candidate(self):
+        from core.cs_re import event_topics
+        topic = "ab" * 32
+        code = "0x" + "7f" + topic + "a1" + "00"   # PUSH32 topic ; LOG1 ; STOP
+        topics = event_topics(code)
+        assert len(topics) == 1
+        assert topics[0]["topic"] == "0x" + topic
+        assert topics[0]["topics"] == 1  # LOG1 carries one topic
+
+    def test_log0_has_no_topic_argument(self):
+        from core.cs_re import event_topics
+        code = "0x" + "a0" + "00"   # LOG0 : anonymous
+        assert event_topics(code) == []
+
+    def test_push32_far_from_any_log_is_not_an_event(self):
+        """Proximity is the filter. A PUSH32 anywhere is mostly a storage key."""
+        from core.cs_re import event_topics
+        code = "0x" + "7f" + "cd" * 32 + "60016002" + "01" * 30 + "a0" + "00"
+        assert event_topics(code) == []
+
+    def test_events_are_deduplicated(self):
+        from core.cs_re import event_topics
+        topic = "11" * 32
+        code = "0x" + ("7f" + topic + "a1") * 3 + "00"
+        assert len(event_topics(code)) == 1
+
+
+class TestDormantPaths:
+    def test_unnamed_selectors_are_reported(self):
+        from core.cs_re import dormant_paths
+        code = "0x" + "63aaaaaaaa" + "14" + "63bbbbbbbb" + "14" + "00"
+        resolved = {"0xaaaaaaaa": ["transfer(address,uint256)"], "0xbbbbbbbb": []}
+        d = dormant_paths(code, resolved)
+        assert d["dormant_count"] == 1
+        assert d["selectors"] == ["0xbbbbbbbb"]
+
+    def test_risk_rises_only_with_delegatecall(self):
+        """A dormant selector alone is a note; with DELEGATECALL it is worth a look."""
+        from core.cs_re import dormant_paths
+        code = "0x" + "63bbbbbbbb" + "14" + "f4" + "00"   # includes DELEGATECALL
+        d = dormant_paths(code, {"0xbbbbbbbb": []})
+        assert d["contract_has_delegatecall"] is True
+        assert d["risk"] == "REVIEW"
+
+    def test_no_dormant_selectors_is_not_a_safety_claim(self):
+        from core.cs_re import dormant_paths
+        d = dormant_paths("0x60006000", {})
+        assert d["dormant_count"] == 0
+        assert "not proof the contract is safe" in d["caveat"]
+
+    def test_no_per_selector_attribution_is_claimed(self):
+        from core.cs_re import dormant_paths
+        d = dormant_paths("0x" + "63bbbbbbbb" + "14" + "f4" + "00", {"0xbbbbbbbb": []})
+        assert "no reliable function boundaries" in d["explanation"]
+
+
+# --------------------------------------------------------------------------- #
+# 7. metadata / IPFS hash
+# --------------------------------------------------------------------------- #
+
+class TestMetadataExtraction:
+    BLOB = "a264697066735822" + "1220" + "cd" * 32
+
+    def test_sha2_multihash_is_extracted(self):
+        from core.cs_re import extract_metadata
+        m = extract_metadata("0x" + "6080604052" + "00" * 8 + self.BLOB)
+        assert m["found"] is True
+        assert m["ipfs"] == "cd" * 32
+        assert m["cid"].startswith("Qm")
+
+    def test_cid_v0_is_derived_not_hardcoded(self):
+        """Regression: hand-written CIDs and selectors have gone wrong three times
+        today. The CID is computed from the digest."""
+        from core.cs_re import extract_metadata
+        # pad past the minimum length the extractor requires
+        m = extract_metadata("0x" + "60" * 20 + self.BLOB)
+        assert len(m["cid"]) == 46
+        assert m["cid"].startswith("Qm")
+
+    def test_absent_metadata_is_reported_not_assumed(self):
+        from core.cs_re import extract_metadata
+        m = extract_metadata("0x" + "6001600201" + "00" * 40)
+        assert m["found"] is False
+        assert m["reason"]
+
+    def test_short_code_is_reported(self):
+        from core.cs_re import extract_metadata
+        m = extract_metadata("0x6001")
+        assert m["found"] is False
+        assert "too short" in m["reason"]
+
+
+# --------------------------------------------------------------------------- #
+# 2. cross-contract relationships
+# --------------------------------------------------------------------------- #
+
+class TestRelationshipInference:
+    def test_immutable_addresses_are_recovered(self):
+        from core.cs_re import _address_constants
+        a1, a2 = "11" * 20, "22" * 20
+        code = "0x" + "73" + a1 + "73" + a2 + "00"
+        assert _address_constants(code) == ["0x" + a1, "0x" + a2]
+
+    def test_sentinels_are_not_counted_as_counterparties(self):
+        """0xffff..ffff is max-uint160 and 0xeeee..eeee a native marker. Reporting
+        them as relationships makes the output look busy with no information."""
+        from core.cs_re import _address_constants
+        code = "0x" + "73" + "ff" * 20 + "73" + "ee" * 20 + "73" + "33" * 20 + "00"
+        assert _address_constants(code) == ["0x" + "33" * 20]
+
+    def test_call_kinds_are_enumerated(self):
+        from core.cs_re import call_sites
+        code = "0x" + "f1" + "f4" + "fa" + "00"     # CALL ; DELEGATECALL ; STATICCALL
+        c = call_sites(code)
+        assert c["count"] == 3
+        assert c["can_execute_foreign_code_in_own_storage"] is True
+
+    def test_staticcall_only_cannot_execute_foreign_code(self):
+        from core.cs_re import call_sites
+        c = call_sites("0x" + "fa" + "fa" + "00")
+        assert c["can_execute_foreign_code_in_own_storage"] is False
+
+    def test_no_per_call_pairing_is_claimed(self):
+        from core.cs_re import call_sites
+        assert "not a proven pairing" in call_sites("0x6001f100")["note"]
+
+
+# --------------------------------------------------------------------------- #
+# 6. runtime identification
+# --------------------------------------------------------------------------- #
+
+class TestRuntimeIdentification:
+    @pytest.mark.parametrize(
+        "blob,runtime,supported",
+        [
+            ("0x6080604052" + "a264697066735822" + "00" * 40, "EVM_SOLIDITY", True),
+            ("0x6080604052366100135761001161001", "EVM", True),
+            ("0x7f454c46010101000000000000000000", "SOLANA_SBF", False),
+            ("0x0061736d0100000001", "COSMWASM", False),
+            ("0x5345495241", "CAIRO", False),
+            ("0xdeadbeefcafe", "UNKNOWN", False),
+        ],
+    )
+    def test_runtime_is_identified(self, blob, runtime, supported):
+        from core.cs_re import identify_runtime
+        r = identify_runtime(blob)
+        assert r["runtime"] == runtime
+        assert r["supported"] is supported
+
+    def test_unknown_is_never_assumed_evm(self):
+        """The dangerous direction: applying EVM heuristics to Solana/CosmWasm/
+        Cairo/Move would produce confident nonsense."""
+        from core.cs_re import identify_runtime
+        r = identify_runtime("0xdeadbeefcafe")
+        assert r["is_evm"] is None
+        assert "NOT assumed to be EVM" in r["guidance"]
+
+    def test_empty_code_is_reported(self):
+        from core.cs_re import identify_runtime
+        assert identify_runtime("0x")["runtime"] == "EMPTY"
+
+
+# --------------------------------------------------------------------------- #
+# 7. metadata
+# --------------------------------------------------------------------------- #
+
+class TestFetchGuards:
+    def test_cid_is_not_hardcoded(self):
+        from core.cs_re import extract_metadata
+        a = extract_metadata("0x" + "60" * 20 + "a264697066735822" + "1220" + "aa" * 32)
+        b = extract_metadata("0x" + "60" * 20 + "a264697066735822" + "1220" + "bb" * 32)
+        assert a["cid"] != b["cid"], "different digests must yield different CIDs"

@@ -268,3 +268,86 @@ def access_cmd(
     if h["role_hashes"]:
         typer.echo(f"role/storage keys: {h['role_hashes'][:4]}")
     typer.echo(f"note            : {h['note']}")
+
+
+@app.command(name="relations")
+def relations_cmd(
+    address: str = typer.Argument(...),
+    chain: str = typer.Option("1", "--chain"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    """Who this contract talks to: embedded counterparties and call sites."""
+    load_dotenv()
+    try:
+        r = cs_re.infer_relationships(chain, address)
+    except cs_re.REError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(2)
+    if json_output:
+        typer.echo(json.dumps(r, indent=2, default=str))
+        return
+    typer.echo(f"counterparties : {r['immutable_count']} "
+               f"(sentinels ignored: {len(r['sentinels_ignored'])})")
+    for a in r["with_code"]:
+        typer.echo(f"  contract  {a}")
+    for a in r["without_code"]:
+        typer.echo(f"  no code   {a}")
+    typer.echo(f"calls           : {r['calls']['by_op']}")
+    typer.echo(f"foreign code ok : {r['calls']['can_execute_foreign_code_in_own_storage']}")
+    typer.echo(f"note            : {r['explanation']}")
+
+
+@app.command(name="source")
+def source_cmd(
+    address: str = typer.Argument(...),
+    chain: str = typer.Option("1", "--chain"),
+    fetch: bool = typer.Option(False, "--fetch", help="Attempt IPFS retrieval of the published source"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    """Recover the metadata IPFS hash, and optionally the published source."""
+    load_dotenv()
+    try:
+        code = cs_re.runtime_code(chain, address)
+    except cs_re.REError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(2)
+    m = cs_re.extract_metadata(code)
+    out: dict = {"address": address, "metadata": m}
+    if fetch and m.get("cid"):
+        out["source"] = cs_re.fetch_published_source(m["cid"])
+    if json_output:
+        typer.echo(json.dumps(out, indent=2, default=str))
+        return
+    typer.echo(f"metadata found : {m['found']}   ({m['reason']})")
+    if m.get("cid"):
+        typer.echo(f"ipfs cid       : {m['cid']}")
+        if fetch:
+            s = out.get("source", {})
+            typer.echo(f"source fetched : {s.get('fetched')}")
+            if s.get("fetched"):
+                typer.echo(f"bytes          : {s.get('bytes')}")
+            else:
+                for a in s.get("attempts", []):
+                    typer.echo(f"  {a['gateway']}  ok={a['ok']} {a.get('error','')[:60]}")
+    typer.echo("note            : the hash proves which source produced THIS bytecode; "
+                "it is not proof the program intended to publish it, and on an "
+                "upgradeable proxy it describes the implementation, not the address.")
+
+
+@app.command(name="runtime")
+def runtime_cmd(
+    address: str = typer.Argument(...),
+    chain: str = typer.Option("1", "--chain"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    """Identify the execution runtime before applying any EVM logic to it."""
+    load_dotenv()
+    r = cs_re.identify_target(chain, address)
+    if json_output:
+        typer.echo(json.dumps(r, indent=2, default=str))
+        return
+    typer.echo(f"address           : {r.get('address')}")
+    typer.echo(f"chain             : {r.get('chain')}  (expected {r.get('expected_runtime')})")
+    typer.echo(f"runtime           : {r.get('runtime')}")
+    typer.echo(f"supported by RE   : {r.get('supported')}")
+    typer.echo(f"guidance          : {r.get('guidance')}")

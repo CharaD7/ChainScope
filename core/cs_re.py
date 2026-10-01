@@ -328,14 +328,15 @@ def _storage(chain: str, address: str, slot: str) -> str | None:
     return None if int(addr, 16) == 0 else addr
 
 
-def _call(chain: str, address: str, sig: str, args: str = "") -> tuple[bool, str]:
+def _call(chain: str, address: str, sig: str, args: str = "",
+          timeout: int = 90) -> tuple[bool, str]:
     url = rpc_for(chain)
     if not url:
         return False, ""
     a = [f"{address}", sig]
     if args:
         a += args.split()
-    return _cast(["call", *a, "--rpc-url", url], timeout=90)
+    return _cast(["call", *a, "--rpc-url", url], timeout=timeout)
 
 
 def resolve_proxy(chain: str, address: str) -> dict[str, t.Any]:
@@ -556,6 +557,17 @@ def summarize(addr_info: dict[str, t.Any]) -> str:
         ops = addr_info.get("dangerous_ops", [])
         if ops:
             L.append("opcodes     : " + ", ".join(f"{d['op']}x{d['count']}" for d in ops[:6]))
+        acc = addr_info.get("access") or {}
+        if acc:
+            L.append(f"access      : {acc.get('verdict')} ({acc.get('confidence')})")
+        ev = addr_info.get("events") or {}
+        if ev:
+            named = [e["signatures"][0] for e in ev.get("events", []) if e.get("signatures")]
+            if named:
+                L.append(f"events      : {len(named)} named, e.g. " + "; ".join(named[:3]))
+        dorm = addr_info.get("dormant") or {}
+        if dorm:
+            L.append(f"dormant     : {dorm.get('dormant_count')} unnamed selectors, risk={dorm.get('risk')}")
     return "\n".join(L)
 
 
@@ -601,6 +613,9 @@ def analyze(chain: str, address: str, *, resolve_4byte: bool = True,
         if resolved:
             entry["resolved"] = resolved
             entry["inference"] = infer_interfaces(resolved)
+            entry["events"] = resolve_events(event_topics(code)[:40])
+            entry["dormant"] = dormant_paths(code, resolved, entry["inference"].get("interfaces"))
+        entry["access"] = access_control_hints(code)
         analyses.append(entry)
 
     info["implementations"] = analyses
@@ -611,6 +626,9 @@ def analyze(chain: str, address: str, *, resolve_4byte: bool = True,
         info["dangerous_ops"] = primary.get("dangerous_ops", [])
         info["inference"] = primary.get("inference", {})
         info["storage_slots"] = primary.get("storage_slots", [])
+        info["events"] = primary.get("events", {})
+        info["dormant"] = primary.get("dormant", {})
+        info["access"] = primary.get("access", {})
 
     # Diamonds hide their surface: say so rather than let a thin selector list
     # imply the contract is small.
@@ -1004,3 +1022,457 @@ def guard_coverage(code_hex: str, signatures: list[str]) -> dict[str, t.Any]:
             "caller guard exists SOMEWHERE, not that any particular selector is safe."
         ),
     }
+
+
+# --------------------------------------------------------------------------- #
+# 3. event signature recovery
+# --------------------------------------------------------------------------- #
+# EVM logs carry only hashed topics, but compilers place a PUSH32 of the topic
+# hash immediately before the LOG, so the hash is recoverable. `cast 4byte-event`
+# then resolves it - and event names are often the clearest statement of what a
+# contract actually does: a `WithdrawalRequested` or `DebtIncreased` tells you the
+# protocol's function far faster than its function names do.
+
+LOG_OPS = {0xA0, 0xA1, 0xA2, 0xA3, 0xA4}
+
+
+def event_topics(code_hex: str, *, context: int = 12) -> list[dict[str, t.Any]]:
+    """PUSH32 constants that sit next to a LOG, as topic0 candidates.
+
+    The proximity requirement matters: a PUSH32 anywhere in the code is mostly
+    storage keys and masks, and reporting those as event signatures would be
+    nonsense.
+    """
+    ops = [(op, data) for op, data in iter_opcodes(code_hex)]
+    out: list[dict[str, t.Any]] = []
+    seen: set[str] = set()
+    for i, (op, data) in enumerate(ops):
+        if op not in LOG_OPS:
+            continue
+        for j in range(max(0, i - context), i):
+            jop, jdata = ops[j]
+            if jop == 0x7F and len(jdata) == 64:
+                topic = "0x" + jdata.lower()
+                if topic not in seen:
+                    seen.add(topic)
+                    out.append({
+                        "topic": topic,
+                        # derived from the LOG opcode, not from the distance
+                        # between opcodes: LOG0..LOG4 carry 0..4 topics, and for a
+                        # non-anonymous event topic0 IS the signature hash
+                        "topics": op - 0xA0,
+                    })
+                break
+    return out
+
+
+_EVENT_CACHE: dict[str, list[str]] = {}
+
+
+def resolve_events(topics: list[dict[str, t.Any]]) -> dict[str, t.Any]:
+    """Resolve topic0 candidates to event signatures."""
+    todo = [t["topic"] for t in topics if t["topic"] not in _EVENT_CACHE]
+    for topic in todo:
+        ok, txt = _cast(["4byte-event", topic], timeout=60)
+        names = []
+        if ok:
+            for line in txt.splitlines():
+                line = line.strip()
+                if "(" in line and ")" in line:
+                    names.append(line.split(" ")[0])
+        _EVENT_CACHE[topic] = names
+    resolved = [{**t, "signatures": _EVENT_CACHE.get(t["topic"], [])} for t in topics]
+    return {
+        "events": resolved,
+        "resolved_count": sum(1 for e in resolved if e["signatures"]),
+        "unresolved_count": sum(1 for e in resolved if not e["signatures"]),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# 5. dormant paths
+# --------------------------------------------------------------------------- #
+# Selectors the contract can execute but that no ABI, and no signature database,
+# can name. These are where backdoors hide: a `sweep(address)` or a
+# `setOwner(address)` behind an unadvertised selector is invisible to any review
+# driven by the interface, and is exactly the shape that survives audits.
+#
+# This reports candidates and context. It does NOT attribute a selector to a code
+# region: bytecode carries no reliable function boundaries, so claiming "this
+# selector reaches a delegatecall" would be fabricated precision. What it can say
+# honestly is how many unnameable entrypoints exist and whether the contract
+# contains the opcodes a backdoor would need.
+
+def dormant_paths(code_hex: str, resolved: dict[str, list[str]],
+                   interfaces: dict[str, t.Any] | None = None) -> dict[str, t.Any]:
+    """Selectors with no resolvable signature, ranked by what surrounds them."""
+    sel = extract_selectors(code_hex)
+    unresolved = [s for s in sel["dispatcher"] if not resolved.get(s)]
+
+    ops = dangerous_ops(code_hex)
+    has_delegate = any(o["op"] == "DELEGATECALL" for o in ops)
+    has_selfdestruct = any(o["op"] == "SELFDESTRUCT" for o in ops)
+
+    # a selector only counts as "standard" if it was matched, not merely present
+    matched = sum(len(v["matched"]) for v in (interfaces or {}).values())
+    explained = len(set())  # no offline standard map available; stay conservative
+
+    risk = "LOW"
+    if unresolved and (has_delegate or has_selfdestruct):
+        risk = "REVIEW"
+    elif unresolved:
+        risk = "NOTE"
+
+    return {
+        "dormant_count": len(unresolved),
+        "selectors": unresolved[:64],
+        "interfaces_matched_signatures": matched,
+        "excluded_as_known": explained,
+        "contract_has_delegatecall": has_delegate,
+        "contract_has_selfdestruct": has_selfdestruct,
+        "risk": risk,
+        "explanation": (
+            "Selectors that neither 4byte nor any detected interface accounts for. "
+            "Risk is raised only when the contract also contains DELEGATECALL or "
+            "SELFDESTRUCT, which is the machinery a hidden capability would use. "
+            "No per-selector code attribution is claimed: bytecode has no reliable "
+            "function boundaries, so which opcodes a given selector reaches is not "
+            "recoverable here."
+        ),
+        "caveat": "an empty list is not proof the contract is safe; it reflects what 4byte can name",
+    }
+
+
+# --------------------------------------------------------------------------- #
+# 7. metadata / IPFS hash -> published source
+# --------------------------------------------------------------------------- #
+# Solidity appends a CBOR metadata blob to runtime bytecode whose `ipfs` field is
+# a 34-byte multihash. That hash is how the compiler recorded the exact source it
+# built - which means for a contract with no Sourcify entry, the metadata may
+# still point at the published sources.
+#
+# Caveat that must travel with any result: the hash proves WHICH source produced
+# the bytecode. It does not prove that source is what is deployed in the sense
+# that matters for a bug report - an upgraded proxy serves code the hash describes
+# correctly but that the user never chose. Always resolve the implementation first.
+
+_CBOR_MARKER = "a264697066735822"   # a2 64 "ipfs" 58 22
+_META_LEN = 53                         # map(1) + key + 0x22 + 34-byte multihash
+
+
+def extract_metadata(code_hex: str) -> dict[str, t.Any]:
+    """Pull the Swarm/IPFS metadata hash off the end of runtime bytecode."""
+    h = _strip_hex(code_hex).lower()
+    out: dict[str, t.Any] = {"found": False, "reason": None, "ipfs": None, "swarm": None}
+    if len(h) < _META_LEN * 2:
+        out["reason"] = "code too short to carry a metadata blob"
+        return out
+    i = h.rfind(_CBOR_MARKER)
+    if i < 0:
+        out["reason"] = "no CBOR ipfs marker found (unverified build, or stripped)"
+        return out
+    tail = h[i + len(_CBOR_MARKER):]
+    digest = tail[:68]
+    if len(digest) < 68:
+        out["reason"] = "metadata marker present but digest truncated"
+        return out
+    # multihash: 0x12 0x20 (sha2-256, 32 bytes)
+    out["found"] = True
+    if digest.startswith("1220"):
+        digest_hex = digest[4:]
+        out["ipfs"] = digest_hex
+        out["cid"] = _to_cid_v0(digest_hex)
+        out["reason"] = "sha2-256 multihash"
+    else:
+        out["swarm"] = digest
+        out["reason"] = "non-sha2 multihash (swarm-style); not resolvable as IPFS"
+    out["metadata_offset_bytes"] = i // 2
+    return out
+
+
+def _to_cid_v0(digest_hex: str) -> str:
+    """0x-prefixed multihash digest -> base58 CIDv0, without a b58 dependency."""
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    raw = bytes.fromhex("1220" + digest_hex)
+
+    def b58(data: bytes) -> str:
+        num = int.from_bytes(data, "big")
+        out = ""
+        while num:
+            num, rem = divmod(num, 58)
+            out = alphabet[rem] + out
+        for byte in data:
+            if byte:
+                break
+            out = alphabet[0] + out
+        return out
+
+    return b58(raw)
+
+
+def fetch_published_source(cid: str, timeout: int = 90) -> dict[str, t.Any]:
+    """Try to retrieve the published source for a CID, over several gateways.
+
+    Reported as a FETCH result only. Content at a CID is not necessarily the
+    audited source, and is not necessarily present at all; a gateway returning
+    something proves nothing about whether the program intended to publish it.
+    """
+    # cloudflare-ipfs.com is retired (NXDOMAIN) and public gateways rate-limit
+    # aggressively from shared IPs - a 429 here is a transport condition, not
+    # evidence the CID is unresolvable, and is reported as such.
+    urls = [
+        f"https://ipfs.io/ipfs/{cid}",
+        f"https://gateway.pinata.cloud/ipfs/{cid}",
+        f"https://w3s.link/ipfs/{cid}",
+        f"https://nftstorage.link/ipfs/{cid}",
+    ]
+    attempts: list[dict[str, t.Any]] = []
+    import urllib.error
+    import urllib.request
+
+    for u in urls:
+        try:
+            req = urllib.request.Request(u, headers={"User-Agent": "chainscope-re"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = resp.read()
+            attempts.append({"gateway": u, "ok": True, "bytes": len(body),
+                             "content_type": resp.headers.get("Content-Type")})
+            return {"fetched": True, "cid": cid, "bytes": len(body),
+                    "source": body.decode("utf-8", "replace"), "attempts": attempts}
+        except Exception as exc:  # noqa: BLE001
+            attempts.append({"gateway": u, "ok": False, "error": f"{type(exc).__name__}: {exc}"[:100]})
+    return {"fetched": False, "cid": cid, "attempts": attempts}
+
+
+# --------------------------------------------------------------------------- #
+# 2. cross-contract inference: who does this contract talk to, and how
+# --------------------------------------------------------------------------- #
+# Reading one contract at a time hides the protocol. This recovers the shape of a
+# contract's OUTBOUND relationships from bytecode alone:
+#
+#   * immutable and PUSH20 address constants -> counterparties it can reach
+#     without any storage read
+#   * CALL-family sites -> how it moves value, and whether it can execute foreign
+#     code in its own storage (DELEGATECALL) or only query others (STATICCALL)
+#   * selector constants used as arguments to those calls -> which functions it
+#     calls on those counterparties
+#
+# What this deliberately does NOT claim: bytecode has no reliable function
+# boundaries, so every finding here is contract-level. "It can delegatecall" is
+# stated; "function 0x1234 delegates" is not, because that attribution cannot be
+# recovered here. Overstating it would be the same class of error this module has
+# already made twice today.
+
+STATICCALL = 0xFA
+CALLCODE_OPS = {0xF1, 0xF2, 0xF4, 0xFA}
+
+
+# PUSH20 immediates that are conventional sentinels rather than counterparties:
+# the zero address, max-uint160, the "dead"/"eee" markers and the EIP-7702-style
+# native placeholder. Reporting them as relationships makes the output look busy
+# while adding no information.
+_SENTINELS = {
+    "0x" + "00" * 20,
+    "0x" + "ff" * 20,
+    "0x" + "dd" * 20,
+    "0x" + "ee" * 20,
+    "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+}
+
+
+def _address_constants(code_hex: str) -> list[str]:
+    """PUSH20 immediates that look like real embedded addresses (immutables)."""
+    out: set[str] = set()
+    for op, data in iter_opcodes(code_hex):
+        if op == 0x73 and len(data) == 40:
+            a = "0x" + data.lower()
+            if a not in _SENTINELS:
+                out.add(a)
+    return sorted(out)
+
+
+def call_sites(code_hex: str, *, context: int = 16) -> dict[str, t.Any]:
+    """Enumerate CALL-family sites and the selector pushed before each.
+
+    A PUSH4 within a short window before a CALL is very likely the function
+    selector being invoked. Reported as a candidate, never as certainty.
+    """
+    ops = [(op, data) for op, data in iter_opcodes(code_hex)]
+    sites: list[dict[str, t.Any]] = []
+    for i, (op, _) in enumerate(ops):
+        if op not in CALLCODE_OPS:
+            continue
+        name = {0xF1: "CALL", 0xF2: "CALLCODE", 0xF4: "DELEGATECALL", 0xFA: "STATICCALL"}[op]
+        sel = None
+        for j in range(max(0, i - context), i):
+            jop, jdata = ops[j]
+            if jop == 0x63 and len(jdata) == 8:
+                sel = "0x" + jdata.lower()
+                break
+        sites.append({"index": i, "op": name, "selector_candidate": sel})
+    by_op: dict[str, int] = {}
+    for s in sites:
+        by_op[s["op"]] = by_op.get(s["op"], 0) + 1
+    return {
+        "sites": sites,
+        "count": len(sites),
+        "by_op": by_op,
+        "can_execute_foreign_code_in_own_storage": any(
+            s["op"] in ("DELEGATECALL", "CALLCODE") for s in sites),
+        "note": (
+            "Contract-level. The selector preceding a call is a candidate, not a "
+            "proven pairing: without function boundaries a selector cannot be "
+            "attributed to a specific call site with confidence."
+        ),
+    }
+
+
+def infer_relationships(chain: str, address: str, code_hex: str | None = None,
+                        max_probe: int = 12) -> dict[str, t.Any]:
+    """Counterparties this contract can reach, with cheap liveness probes.
+
+    Constants are the reliable part - they are addresses baked into the code.
+    Probing is best-effort and reported per-address, because an address that does
+    not answer may simply have no view function matching what we tried.
+    """
+    code = code_hex if code_hex is not None else runtime_code(chain, address)
+    consts = _address_constants(code)
+    calls = call_sites(code)
+
+    probes: list[dict[str, t.Any]] = []
+    for a in consts[:max_probe]:
+        try:
+            ok, _ = _call(chain, a, "implementation()(address)", timeout=25)
+            is_proxy = ok
+            code_size = 0
+            ok_code, raw = _cast(["codesize", a, "--rpc-url", rpc_for(chain) or ""], timeout=25)
+            if ok_code and raw.strip().isdigit():
+                code_size = int(raw.strip())
+            probes.append({
+                "address": a,
+                "has_code": code_size > 0,
+                "code_size": code_size,
+                "looks_like_proxy": is_proxy,
+            })
+        except Exception:  # noqa: BLE001
+            probes.append({"address": a, "has_code": None, "code_size": 0, "looks_like_proxy": False})
+
+    live = [p for p in probes if p.get("has_code")]
+    sentinels = sorted({
+        "0x" + d.lower() for op, d in iter_opcodes(code)
+        if op == 0x73 and len(d) == 40 and ("0x" + d.lower()) in _SENTINELS
+    })
+    return {
+        "address": address,
+        "immutable_addresses": consts,
+        "immutable_count": len(consts),
+        "with_code": [p["address"] for p in live],
+        "without_code": [p["address"] for p in probes if not p.get("has_code")],
+        "proxy_like": [p["address"] for p in probes if p.get("looks_like_proxy")],
+        "sentinels_ignored": sentinels,
+        "calls": {k: v for k, v in calls.items() if k != "sites"},
+        "call_selector_candidates": sorted({
+            s["selector_candidate"] for s in calls["sites"] if s["selector_candidate"]
+        })[:64],
+        "explanation": (
+            "Addresses recovered from PUSH20 constants in the bytecode. This is a "
+            "lower bound on counterparties: anything loaded from storage, or built "
+            "at runtime, is invisible here."
+        ),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# 6. runtime identification and routing (NOT a non-EVM disassembler)
+# --------------------------------------------------------------------------- #
+# This is deliberately not a Solana/CosmWasm/Cairo/Move reverse engineer. Those
+# are separate disciplines with their own instruction sets, and pretending
+# otherwise would produce confident nonsense - the exact failure this module has
+# already made several times today. What is genuinely useful is knowing WHAT a
+# contract is before applying EVM logic to it, because every other function here
+# assumes EVM opcodes.
+#
+# ChainScope's supported RE is EVM. For other runtimes this reports the identity
+# and the correct next step, and stops.
+
+RUNTIME_SIGNATURES: list[tuple[str, str, str, str]] = [
+    # (magic/regex, label, chain hint, guidance)
+    (r"^7f454c46", "ELF", "solana", "SBF/ELF program - use an SBF disassembler; EVM opcode logic does not apply"),
+    (r"^0061736d", "WASM", "cosmos", "CosmWasm module - decode the wasm and read the Rust/Go source if published"),
+    (r"^5345", "CASM", "starknet", "Cairo compiled output - read Sierra/Cairo source"),
+    (r"^a2646970667358", "EVM_CBOR_METADATA", "evm", "Solidity/EVM runtime"),
+    (r"^a17364657269616e", "SOLIDITY_BYTECODE", "evm", "old solc runtime"),
+    (r"^7f", "RAW", "unknown", "unrecognised runtime"),
+]
+
+
+def identify_runtime(code_hex: str) -> dict[str, t.Any]:
+    """Identify the execution runtime behind a blob of code.
+
+    Never guesses 'EVM' for an unrecognised blob: on Solana, Cosmos, Starknet and
+    Move, every EVM heuristic in this module would produce confident nonsense.
+    Unknown is reported as unknown, with the consequence spelled out.
+    """
+    h = _strip_hex(code_hex)
+    if not h:
+        return {"runtime": "EMPTY", "is_evm": False, "supported": False,
+                "guidance": "no code at this address"}
+    # the metadata CBOR marker at the tail is the strongest positive EVM signal
+    if "a2646970667358" in h[:200]:
+        return {"runtime": "EVM_SOLIDITY", "is_evm": True, "supported": True,
+                "guidance": "Solidity runtime; this module's analysis applies"}
+    head = h[:16].lower()
+    if head.startswith("7f454c46"):
+        return {"runtime": "SOLANA_SBF", "is_evm": False, "supported": False,
+                "guidance": "SBF/ELF program. EVM opcode logic does not apply; "
+                            "use an SBF disassembler and read the Rust program"}
+    if head.startswith("0061736d"):
+        return {"runtime": "COSMWASM", "is_evm": False, "supported": False,
+                "guidance": "CosmWasm module. Decode the wasm; read the Rust/Go source "
+                            "if published"}
+    if head.startswith("5345") or head.startswith("0043"):
+        return {"runtime": "CAIRO", "is_evm": False, "supported": False,
+                "guidance": "Cairo/Sierra. Read the Cairo source; Starknet contracts are "
+                            "often verified and readable directly"}
+    # EVM heuristics: solidity/evm prelude, or a plausible dispatcher
+    if head.startswith("608060405") or head.startswith("60806"):
+        return {"runtime": "EVM", "is_evm": True, "supported": True,
+                "guidance": "EVM runtime with the standard solidity prelude"}
+    if head.startswith("6080") or head.startswith("80"):
+        return {"runtime": "EVM_LIKELY", "is_evm": True, "supported": True,
+                "guidance": "looks like EVM but without the standard prelude; verify before trusting"}
+    return {"runtime": "UNKNOWN", "is_evm": None, "supported": False,
+            "guidance": "Unrecognised runtime. NOT assumed to be EVM - Solana, CosmWasm, "
+                        "Cairo and Move are all non-EVM and every EVM heuristic here would "
+                        "be wrong on them"}
+
+
+CHAIN_RUNTIME_HINT = {
+    "1": "evm", "42161": "evm", "10": "evm", "137": "evm", "8453": "evm",
+    "56": "evm", "43114": "evm", "250": "evm",
+    "solana": "solana", "cairo-1": "starknet", "starknet": "starknet",
+    "cosmoshub-4": "cosmos", "osmo-1": "cosmos", "juno-1": "cosmos",
+    "sui": "move", "aptos-mainnet": "move", "polygon": "evm", "arbitrum": "evm",
+}
+
+
+def identify_target(chain: str, address: str) -> dict[str, t.Any]:
+    """Chain hint plus runtime identity, with an explicit supported/unsupported flag."""
+    expected = CHAIN_RUNTIME_HINT.get(str(chain).lower())
+    try:
+        code = runtime_code(chain, address)
+    except REError as exc:
+        return {"chain": chain, "address": address, "expected_runtime": expected,
+                "runtime": "UNREACHABLE", "supported": False, "reason": str(exc)}
+    ident = identify_runtime(code)
+    supported = bool(ident.get("is_evm"))
+    if expected and expected != "evm" and ident.get("is_evm"):
+        return {
+            **ident, "chain": chain, "address": address,
+            "expected_runtime": expected, "supported": False,
+            "guidance": f"chain {chain} is expected to be {expected}, but this looks like "
+                        "EVM. Verify before drawing conclusions.",
+        }
+    return {**ident, "chain": chain, "address": address,
+            "expected_runtime": expected, "supported": ident.get("supported", False),
+            "code_bytes": len(_strip_hex(code)) // 2}
