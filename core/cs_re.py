@@ -740,7 +740,26 @@ def selectors_from_source(root: Path) -> dict[str, list[str]]:
 
 def compare_source_to_deployed(chain: str, address: str, source_root: Path,
                                resolve_4byte: bool = True) -> dict[str, t.Any]:
-    """Diff a source tree's declared selectors against a deployed contract."""
+    """Diff a source tree's declared selectors against a deployed contract.
+
+    KNOWN LIMITATION - this cannot verify a contract with inheritance, and its
+    verdict should not be trusted on one. The deployed bytecode of an inherited
+    contract carries every inherited public function (hasRole, grantRole,
+    getRoleAdmin, proxiableUUID, ...), which no single source file declares, so
+    the comparison always reports "deployed exposes selectors the source does not
+    declare". Scoping to one file does not fix it - it just inverts the
+    asymmetry.
+
+    This was misread twice on mETH: first as "deployed diverges from the repo"
+    (it was comparing one contract against the whole src/ tree), then as a scoped
+    check that also said DIVERGES. Both were artefacts of the comparison, not of
+    the code.
+
+    For real verification use the direct route, which needs no inference:
+    fetch the deployed implementation's Sourcify source and compare bytes with the
+    repository file. For mETH that is exact_match with md5 7ca18fb0... on both
+    sides - an exact match is evidence; a selector ratio is not.
+    """
     code = runtime_code(chain, address)
     deployed = extract_selectors(code)
     dep = set(deployed["dispatcher"])
@@ -774,6 +793,24 @@ def compare_source_to_deployed(chain: str, address: str, source_root: Path,
             if only_dep else "DIVERGES - source declares selectors the deployment does not expose"
         ),
     }
+
+
+def _file_selectors(path: Path) -> list[str]:
+    """Selectors declared by a single source file."""
+    try:
+        text = _strip_comments(path.read_text(errors="replace"))
+    except OSError:
+        return []
+    out: list[str] = []
+    for m in _FUNC_DECL.finditer(text):
+        name, args = m.group(1), m.group(2)
+        types = [re.sub(r"\s+", "", a.split()[0]) if a.split() else ""
+                 for a in args.split(",") if a.strip()]
+        sig = f"{name}({','.join(types)})"
+        ok, sel = _cast(["sig", sig], timeout=45)
+        if ok and sel.startswith("0x") and len(sel) == 10:
+            out.append(sel.lower())
+    return sorted(set(out))
 
 
 def _strip_comments(text: str) -> str:
