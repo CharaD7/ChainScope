@@ -28,6 +28,8 @@ PUBLIC_FALLBACK = {
     "8453": "https://base-rpc.publicnode.com",
     "56": "https://bsc-rpc.publicnode.com",
     "43114": "https://avalanche-c-chain-rpc.publicnode.com",
+    "534352": "https://rpc.mantle.xyz",
+    "560048": "https://rpc.mantle.xyz",
 }
 
 # Env vars consulted per chain, highest priority first.
@@ -43,6 +45,10 @@ AUTH_ENV = {
     "10": ("RPC_OPTIMISM", "ALCHEMY_OPTIMISM"),
     "137": ("RPC_POLYGON", "ALCHEMY_POLYGON"),
     "8453": ("RPC_BASE", "ALCHEMY_BASE"),
+    # Mantle: mETH/Instascope is deployed here, and it was the one live target we
+    # could not probe at all because no endpoint was configured.
+    "534352": ("RPC_MANTLE", "ALCHEMY_MANTLE"),
+    "560048": ("RPC_MANTLE", "ALCHEMY_MANTLE"),
 }
 
 _ENV_NAME = {

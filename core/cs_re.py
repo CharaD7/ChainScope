@@ -1517,6 +1517,7 @@ def identify_runtime(code_hex: str) -> dict[str, t.Any]:
 CHAIN_RUNTIME_HINT = {
     "1": "evm", "42161": "evm", "10": "evm", "137": "evm", "8453": "evm",
     "56": "evm", "43114": "evm", "250": "evm",
+    "534352": "evm", "560048": "evm",
     "solana": "solana", "cairo-1": "starknet", "starknet": "starknet",
     "cosmoshub-4": "cosmos", "osmo-1": "cosmos", "juno-1": "cosmos",
     "sui": "move", "aptos-mainnet": "move", "polygon": "evm", "arbitrum": "evm",
