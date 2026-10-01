@@ -16,6 +16,8 @@ import json
 import pytest
 
 from cli.cs_immune import (
+    _program_status,
+    _keizo,
     _audits,
     _catalog,
     _program_block,
@@ -309,3 +311,71 @@ def test_cache_version_invalidates_stale_row_shape(monkeypatch, tmp_path):
     # current version -> reused
     cache.write_text(json.dumps({"version": m._CACHE_VERSION, "programs": [{"_slug": "x", "maxBounty": 1}]}))
     assert [p["_slug"] for p in m._load(refresh=False)] == ["x"]
+
+
+# --------------------------------------------------------------------------- #
+# program liveness
+# --------------------------------------------------------------------------- #
+# Scope reachability is not liveness. A paused program still lists repos and
+# addresses and still fetches cleanly, so `scope` and `meta` look healthy for a
+# program nobody is reporting to. Stakewise, Mux and Vesper each reached the
+# front of a triage before being caught this way.
+
+_PAUSED_BADGE = (
+    '<svg width="48" height="48" viewBox="0 0 48 48"><path d="M0 24a24 24 0 1 1 48 0"></path></svg>'
+    "Paused</span></div><div class=\"container\">"
+)
+_LIVE_PAGE = (
+    '\\"pausedAt\\":null,\\"pausedMessage\\":null,\\"kyc\\":true,'
+    '\\"launchDate\\":\\"2023-10-18T09:00:00.000Z\\",\\"endDate\\":null,'
+)
+_NULL_PAUSED_AT = '\\"pausedAt\\":null,'
+_PAUSED_PAYLOAD = '\\"pausedAt\\":\\"2026-02-01T10:00:00.000Z\\",\\"pausedMessage\\":\\"paused\\"'
+
+
+def test_status_detects_paused_badge():
+    st = _program_status(_PAUSED_BADGE)
+    assert st["status"] == "PAUSED"
+    assert st["badge"] is True
+
+
+def test_status_detects_paused_timestamp_in_payload():
+    """Badge-less pages still carry a pausedAt timestamp, double-escaped."""
+    mutated = _LIVE_PAGE.replace(_NULL_PAUSED_AT, _PAUSED_PAYLOAD)
+    st = _program_status(mutated)
+    assert st["status"] == "PAUSED"
+
+
+def test_status_live_page_is_not_paused():
+    assert _program_status(_LIVE_PAGE)["status"] == "LIVE"
+
+
+def test_live_page_containing_pausedat_null_is_not_paused():
+    """The trap: AAVE's live page contains the literal `pausedAt`, so a naive
+    search for the word marks a live program paused."""
+    page = _LIVE_PAGE
+    assert "pausedAt" in page
+    assert _program_status(page)["status"] == "LIVE"
+
+
+def test_status_empty_page_is_unknown_not_live():
+    """A failed read must not be reported as live - that is how a paused
+    program gets targeted."""
+    assert _program_status("")["status"] == "UNKNOWN"
+
+
+def test_paused_program_cannot_rank():
+    p = {"_slug": "mux", "status": {"status": "PAUSED"}, "maxBounty": 5_000_000,
+         "updated": "2026-09-01", "bounty": {"maxBounty": 5_000_000, "primacy": "primacy_of_impact",
+                                             "poc": "1", "kyc": "0", "assets": []}}
+    row = _keizo(p, 1.0)
+    assert row["keizo"] == 0.0
+    assert row["signals"]["live"] is False
+    assert row["status_code"] == "PAUSED"
+
+
+def test_unknown_status_is_capped():
+    p = {"_slug": "x", "status": {"status": "UNKNOWN"}, "maxBounty": 5_000_000,
+         "updated": "2026-09-01", "bounty": {"maxBounty": 5_000_000, "primacy": "primacy_of_impact",
+                                             "poc": "1", "kyc": "0", "assets": []}}
+    assert _keizo(p, 1.0)["keizo"] <= 0.05

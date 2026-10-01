@@ -223,6 +223,10 @@ def _program(slug: str) -> dict[str, typing.Any] | None:
     if obj is None:
         return None
     obj["_slug"] = slug
+    # liveness travels with the program record so every consumer sees it, rather
+    # than requiring each caller to re-fetch the page to discover a program is
+    # paused - which is how paused programs kept reaching the front of triage
+    obj["status"] = _program_status(raw)
     return obj
 
 
@@ -416,6 +420,52 @@ def _audit_evidence(seg: str, raw: str) -> dict[str, typing.Any]:
     }
 
 
+def _program_status(raw: str) -> dict[str, typing.Any]:
+    """Report whether a program still accepts submissions.
+
+    Scope reachability is NOT liveness. A paused program still lists repos and
+    addresses and still fetches cleanly, so `scope` and `meta` both look healthy
+    for a program nobody is reporting to. That is how Stakewise, Mux and Vesper
+    all reached the front of a triage while being paused - two of them also had
+    dormant or archived repositories, which looked like a separate signal but
+    was the same one.
+
+    Two independent signals, because either alone has a failure mode:
+
+    - the rendered `>Paused</span>` badge. Verified as a clean discriminator over
+      nine programs: present on every paused page, absent on every live one.
+    - `pausedAt` in the embedded payload, which holds a timestamp when paused and
+      is `null` when live. It is DOUBLE-ESCAPED in the page (`\\"pausedAt\\":null`),
+      which is why a plain `"pausedAt"` search finds nothing and silently reports
+      every program as live. Scanning for the bare word `paused` is worse still:
+      the live AAVE page contains `"pausedAt":null` and matches it.
+
+    A fetch failure is UNKNOWN rather than LIVE - guessing "live" on a failed
+    read is how a paused program gets targeted.
+    """
+    if not raw:
+        return {"status": "UNKNOWN", "reason": "page fetch returned nothing"}
+
+    badge = re.search(r">\s*Paused\s*</span>", raw) is not None
+    # the payload is double-escaped inside the HTML
+    ts = re.search(r'\\?"pausedAt\\?"\s*:\s*\\?"([^"\\]+)\\?"', raw)
+    paused_at = ts.group(1) if ts else None
+
+    if badge or paused_at:
+        return {
+            "status": "PAUSED",
+            "badge": badge,
+            "paused_at": paused_at,
+            "reason": "paused badge present" if badge else "payload carries a pausedAt timestamp",
+        }
+    return {
+        "status": "LIVE",
+        "badge": False,
+        "paused_at": None,
+        "reason": "no pause marker on the program page",
+    }
+
+
 def _row(p: dict[str, typing.Any]) -> dict[str, typing.Any]:
     seg = p.get("_seg") or ""
     audits = p.get("audits") or []
@@ -606,6 +656,19 @@ def _keizo(p: dict[str, typing.Any], now: float) -> dict[str, typing.Any]:
         0.30 * fresh + 0.25 * payout + 0.20 * (1.0 - dedup_load) + 0.15 * impact + 0.10 * poc,
         3,
     )
+
+    # Liveness gate. A paused program is not a target no matter how good the
+    # other signals look: it still lists scope, still fetches cleanly, and still
+    # pays well on paper, which is exactly why Stakewise, Mux and Vesper each
+    # reached the front of a triage before being caught. Score is forced to 0
+    # and the reason recorded, so a paused program can never rank on merit.
+    status = (p.get("status") or {}).get("status", "UNKNOWN")
+    row["status_code"] = status
+    if status == "PAUSED":
+        score = 0.0
+    elif status == "UNKNOWN":
+        score = min(score, 0.05)
+
     row["keizo"] = score
     row["signals"] = {
         "fresh": round(fresh, 3),
@@ -615,6 +678,8 @@ def _keizo(p: dict[str, typing.Any], now: float) -> dict[str, typing.Any]:
         "audit_evidence": has_ev,
         "primacy_impact": impact,
         "poc_required": poc,
+        "status": status,
+        "live": status == "LIVE",
     }
     return row
 
