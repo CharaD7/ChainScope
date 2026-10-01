@@ -1170,6 +1170,15 @@ def dormant_paths(code_hex: str, resolved: dict[str, list[str]],
     matched = sum(len(v["matched"]) for v in (interfaces or {}).values())
     explained = len(set())  # no offline standard map available; stay conservative
 
+    # RISK IS A SCREENING SIGNAL ONLY, and it has been falsified three ways:
+    #   1. rate-limited 4byte lookups were counted as "unnamed", so a cold cache
+    #      reported Velvet Capital at 30/59 when all 59 resolve;
+    #   2. a contract whose only `init*` is a view satisfies any init probe;
+    #   3. LIBRARIES. A deployed library uses DELEGATECALL by design and its
+    #      helpers are unindexed by nature, so a library is flagged REVIEW while
+    #      being completely normal. Bytecode cannot reliably tell a library from
+    #      a contract, so this cannot be filtered here - it must be checked
+    #      against the source before REVIEW means anything.
     risk = "LOW"
     if unresolved and (has_delegate or has_selfdestruct):
         risk = "REVIEW"
@@ -1192,7 +1201,12 @@ def dormant_paths(code_hex: str, resolved: dict[str, list[str]],
             "function boundaries, so which opcodes a given selector reaches is not "
             "recoverable here."
         ),
-        "caveat": "an empty list is not proof the contract is safe; it reflects what 4byte can name",
+        "caveat": (
+            "An empty list is not proof the contract is safe; it reflects only what "
+            "4byte can name. And REVIEW is expected for a deployed LIBRARY, which "
+            "delegates by design and keeps unindexed helpers - check the source before "
+            "treating REVIEW as a hidden capability."
+        ),
     }
 
 
