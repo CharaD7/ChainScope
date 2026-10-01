@@ -78,6 +78,29 @@ watcher. Because `unstakeRequest` (non-permit) exists and the allowance is set b
 the first attempt, practical mitigation is to approve first and use the plain
 path — which is why Lido rated it Medium rather than High.
 
+## Audit gate: checked, and not a known issue
+
+mETH's scope excludes *"Any issues identified in Published Audits"*
+(docs.mantle.xyz/meth/security/audits), so this had to be verified before
+reporting rather than assumed.
+
+Two published audits cover "Token and Vault Smart Contracts", which is where
+`Staking.sol` and `UnstakeRequestsManager.sol` live:
+
+| Audit | Pages | `permit` / `WithPermit` / `safePermit` | front-running findings |
+|---|---|---|---|
+| Hexens 230825 | 70 | **0** (the 3 `permit` string hits are OCR noise from the word "permitted" in code comments) | none relevant |
+| MixBytes 231030 | 29 | **0** | M-4 `cancelUnfinalizedRequests` DoS; L-3 `topUp` — both unrelated |
+
+The MixBytes report cites line numbers in both files, so it demonstrably covered
+this code, yet never mentions permit at all. The function has existed since the
+first public commit (`cc90a99`, 2023-10-06), so it was in scope for both.
+
+The remaining audits are `Oracle`-only or cover the cmETH/LiquidityBuffer
+architecture updates, which do not touch this path.
+
+**Conclusion: not identified in any published audit, so in scope for submission.**
+
 ## Coverage gap worth flagging separately
 
 The function is tested, but **only on the happy path**
