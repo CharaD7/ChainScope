@@ -29,6 +29,7 @@ from core.cs_rpc import load_dotenv, rpc_for  # noqa: E402
 FOUNDRY = Path.home() / ".foundry/bin"
 DEFAULT_RPC = "https://ethereum.publicnode.com"
 _LOG = re.compile(r"DRIFT_(\S+)\s+(\S+)\s*:\s*(-?\d+)")
+_CLS = re.compile(r"CLASSIFY\s+(\S+)\s*:\s*(-?\d+)")
 
 
 def _env() -> dict[str, str]:
@@ -42,6 +43,29 @@ def latest_block() -> int:
         return int(out.stdout.strip())
     except ValueError:
         return 0
+
+
+def classify(vault: str, asset: str, block: int) -> tuple[dict, str]:
+    """Measure whether a round-trip shortfall is a fee or rounding drift.
+
+    A designed exit fee scales with the deposit; a rounding bug is a roughly
+    fixed number of wei. Both read identically at one amount, so both regimes
+    are measured before anything is concluded.
+    """
+    env = _env()
+    env.update({"TARGET_VAULT": vault, "FORK_BLOCK": str(block),
+                "RPC_URL": os.environ.get("ALCHEMY_MAINNET", DEFAULT_RPC)})
+    if asset:
+        env["TARGET_ASSET"] = asset
+    for _ in range(2):
+        p = subprocess.run(["forge", "test", "--match-contract", "RoundingDriftTest",
+                            "--match-test", "test_classify_shortfall", "-vv"],
+                           cwd=HARNESS, capture_output=True, text=True, timeout=1800, env=env)
+        out = p.stdout + p.stderr
+        got = dict((k, int(v)) for k, v in _CLS.findall(out))
+        if got:
+            return got, out
+    return {}, out
 
 
 def run(vault: str, asset: str, block: int, cycles: int, test: str) -> tuple[dict, str]:
@@ -89,23 +113,34 @@ def main() -> int:
 
     load_dotenv()
     block = args.block or latest_block()
-    print(f"fork block: {block}   cycles: {args.cycles}")
-    print(f"{'vault':<44}{'cycles':>7}{'net':>22}  verdict")
-    print("-" * 100)
+    print(f"fork block: {block}")
 
     summary: dict[str, str] = {}
+    print(f"{'vault':<44}{'rate_ppb':>10}  verdict")
+    print("-" * 96)
     for v in args.vaults:
-        for test, label in (("test_drift_large", "large"), ("test_drift_small", "small")):
-            d, _ = run(v, args.asset, block, args.cycles, test)
-            if not d and label == "small":
-                break
-            verdict_s, note = verdict(d)
-            print(f"{v + ' [' + label + ']':<44}{d.get('cycles_done', 0):>7}"
-                  f"{d.get('net', 0):>22,}  {verdict_s} - {note}")
-            if verdict_s == "DRIFT FOUND":
-                summary[v] = verdict_s
+        c, _ = classify(v, args.asset, block)
+        rate = c.get("small_rate_ppb", 0)
+        verdict_code = c.get("verdict", -1)
+        if not c:
+            note = "RPC-FAILED - no output; not a result"
+        elif verdict_code == 1:
+            # rate is parts-per-billion: fraction = rate/1e9, percent = rate/1e7
+            note = f"EXIT FEE {rate/1e7:.6f}% - proportional, a designed charge, not drift"
+        elif verdict_code == 2:
+            note = "ROUNDING DRIFT - shortfall roughly constant across sizes, a bug"
+        elif verdict_code == 0:
+            note = "NO SHORTFALL - round trip is exact"
+        else:
+            note = "no measurable shortfall"
+        print(f"{v:<44}{rate:>10}  {note}")
+        if verdict_code == 2:
+            summary[v] = "DRIFT"
+        elif verdict_code == 1:
+            summary[v] = "FEE"
     print()
-    print(f"{len(summary)} vault(s) with depositor loss across cycles")
+    print(f"drift: {sum(1 for x in summary.values() if x == 'DRIFT')}   "
+          f"exit fee: {sum(1 for x in summary.values() if x == 'FEE')}")
     return 0
 
 

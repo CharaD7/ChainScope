@@ -2,6 +2,7 @@
 pragma solidity ^0.8.29;
 
 import "forge-std/Test.sol";
+import {ShortfallClassifier} from "../src/ShortfallClassifier.sol";
 
 interface IERC20R {
     function balanceOf(address) external view returns (uint256);
@@ -139,6 +140,69 @@ contract RoundingDriftTest is Test {
             d.cyclesCompleted++;
         }
         d.vaultAssetsAfter = IVaultR(vault).totalAssets();
+    }
+
+    /// A single deposit/redeem round trip, returning the shortfall between what
+    /// the vault reports transferring and what the balance actually rises by.
+    function _shortfall(address vault, address asset, uint256 amount) internal returns (int256) {
+        // must fund and approve here: without a balance the deposit reverts and
+        // the classifier silently reports zero, which reads as "no shortfall"
+        deal(asset, attacker, amount * 4);
+        vm.prank(attacker);
+        IERC20R(asset).approve(vault, type(uint256).max);
+
+        uint256 before = IERC20R(asset).balanceOf(attacker);
+        vm.prank(attacker);
+        uint256 minted;
+        try IVaultR(vault).deposit(amount, attacker) returns (uint256 m) {
+            minted = m;
+        } catch {
+            return 0;
+        }
+        uint256 afterDep = IERC20R(asset).balanceOf(attacker);
+        uint256 reported;
+        vm.prank(attacker);
+        try IVaultR(vault).redeem(minted, attacker, attacker) returns (uint256 b) {
+            reported = b;
+        } catch {
+            return 0;
+        }
+        uint256 rise = IERC20R(asset).balanceOf(attacker) - afterDep;
+        before; // keep the read; the delta we care about is reported-vs-rise
+        return int256(reported) - int256(rise);
+    }
+
+    /// Classifies a shortfall. A designed exit fee scales with the amount; a
+    /// rounding bug is a roughly fixed number of wei per cycle. Measuring both
+    /// regimes is the only way to tell "the vault charges 0.001%" from "the
+    /// vault loses 1 wei" - both read as a round trip coming up short.
+    function test_classify_shortfall() public {
+        if (!_fork()) return;
+        address vault = vm.envAddress("TARGET_VAULT");
+        address asset = vm.envOr("TARGET_ASSET", address(0));
+        if (asset == address(0)) asset = IVaultR(vault).asset();
+
+        int256 small = _shortfall(vault, asset, 1e15);
+        int256 large = _shortfall(vault, asset, 1e18);
+
+        emit log_named_int("CLASSIFY small_shortfall", small);
+        emit log_named_int("CLASSIFY large_shortfall", large);
+        if (small <= 0 || large <= 0) {
+            emit log_named_uint("CLASSIFY verdict", 0);
+            return;
+        }
+        // ratio of shortfall to amount, in units of 1e9 for readability
+        uint256 smallRate = (uint256(small) * 1e9) / 1e15;
+        uint256 largeRate = (uint256(large) * 1e9) / 1e18;
+        emit log_named_uint("CLASSIFY small_rate_ppb ", smallRate);
+        emit log_named_uint("CLASSIFY large_rate_ppb ", largeRate);
+
+        // decision logic is shared with ClassifyControlsTest, which proves it
+        // separates a fee from a fixed-wei drift without needing a fork
+        (ShortfallClassifier.Kind kind, uint256 rate) =
+            ShortfallClassifier.classify(small, large, 20);
+        emit log_named_uint("CLASSIFY rate_ppb ", rate);
+        emit log_named_uint("CLASSIFY verdict", uint256(kind)); // 0=none 1=fee 2=drift
     }
 
     function _emit(string memory tag, Drift memory d) internal {
