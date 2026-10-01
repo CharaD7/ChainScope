@@ -638,3 +638,92 @@ def analyze_many(chain: str, addresses: list[str], **kw: t.Any) -> list[dict[str
         except Exception as exc:  # noqa: BLE001
             out.append({"address": a, "chain": chain, "error": f"{type(exc).__name__}: {exc}"})
     return out
+
+
+# --------------------------------------------------------------------------- #
+# source <-> bytecode differential
+# --------------------------------------------------------------------------- #
+
+_FUNC_DECL = re.compile(r"\bfunction\s+(\w+)\s*\(([^)]*)\)", re.S)
+
+
+def selectors_from_source(root: Path) -> dict[str, list[str]]:
+    """Map file -> the 4-byte selectors its function declarations would produce.
+
+    This is the missing half of deployed-source verification. Sourcify tells you
+    whether source was published; it does not tell you whether the published
+    source is what is deployed. Arcadia's AccountV4 verified on Sourcify while the
+    live bytecode differed from the repository, and sDAI taught the same lesson
+    from the other direction - I inferred a diamond by searching SOURCE TEXT for
+    selector hex, which of course it cannot contain.
+
+    Comparing declared selectors against the deployed dispatcher is cheap, needs
+    no compiler, and catches the exact failure those two cases share: a repo that
+    is newer than, older than, or simply different from the deployment.
+    """
+    from . import cs_re as _self  # noqa: F401  (self-reference keeps imports explicit)
+
+    out: dict[str, list[str]] = {}
+    for sol in Path(root).rglob("*.sol"):
+        if any(part in {"node_modules", "lib", "out", "cache", ".git"} for part in sol.parts):
+            continue
+        try:
+            text = _strip_comments(sol.read_text(errors="replace"))
+        except OSError:
+            continue
+        sels: list[str] = []
+        for m in _FUNC_DECL.finditer(text):
+            name, args = m.group(1), m.group(2)
+            # normalise: strip names, keep types, collapse whitespace
+            types = [re.sub(r"\s+", "", a.split()[0]) if a.split() else ""
+                     for a in args.split(",") if a.strip()]
+            sig = f"{name}({','.join(types)})"
+            ok, sel = _cast(["sig", sig], timeout=45)
+            if ok and sel.startswith("0x") and len(sel) == 10:
+                sels.append(sel.lower())
+        if sels:
+            out[str(sol.relative_to(root))] = sorted(set(sels))
+    return out
+
+
+def compare_source_to_deployed(chain: str, address: str, source_root: Path,
+                               resolve_4byte: bool = True) -> dict[str, t.Any]:
+    """Diff a source tree's declared selectors against a deployed contract."""
+    code = runtime_code(chain, address)
+    deployed = extract_selectors(code)
+    dep = set(deployed["dispatcher"])
+    per_file = selectors_from_source(Path(source_root))
+    src_all: set[str] = set()
+    for sels in per_file.values():
+        src_all.update(sels)
+
+    only_src = sorted(src_all - dep)
+    only_dep = sorted(dep - src_all)
+    shared = sorted(dep & src_all)
+
+    resolved: dict[str, list[str]] = {}
+    if resolve_4byte and (only_src or only_dep):
+        resolved = resolve_selectors(only_dep[:60])
+
+    return {
+        "address": address,
+        "source_root": str(source_root),
+        "deployed_selector_count": len(dep),
+        "source_selector_count": len(src_all),
+        "shared": len(shared),
+        "only_in_source": only_src,
+        "only_in_deployed": only_dep,
+        "only_in_deployed_resolved": resolved,
+        "per_file_source_selectors": {k: len(v) for k, v in list(per_file.items())[:20]},
+        "verdict": (
+            "SOURCE MATCHES DEPLOYED"
+            if not only_src and not only_dep
+            else "DIVERGES - deployed exposes selectors the source does not declare"
+            if only_dep else "DIVERGES - source declares selectors the deployment does not expose"
+        ),
+    }
+
+
+def _strip_comments(text: str) -> str:
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    return re.sub(r"//[^\n]*", "", text)

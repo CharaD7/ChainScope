@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import typing as t
+from pathlib import Path
 
 import typer
 
@@ -168,3 +169,43 @@ def diff_cmd(
         for sel, names in res.items():
             if names:
                 typer.echo(f"  {label}: {sel} -> {', '.join(names)}")
+
+@app.command(name="compare-source")
+def compare_source_cmd(
+    address: str = typer.Argument(...),
+    path: str = typer.Option(..., "--path", help="Local source tree to compare against"),
+    chain: str = typer.Option("1", "--chain"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    """Compare a source tree's declared selectors against deployed bytecode.
+
+    Answers the question Sourcify cannot: is the published source the thing that
+    is actually deployed? Needs no compiler, so it works on repos that will not
+    build.
+    """
+    load_dotenv()
+    root = Path(path)
+    if not root.is_dir():
+        typer.echo(f"not a directory: {path}")
+        raise typer.Exit(2)
+    try:
+        r = cs_re.compare_source_to_deployed(chain, address, root)
+    except cs_re.REError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(2)
+    if json_output:
+        typer.echo(json.dumps(r, indent=2, default=str))
+        return
+    typer.echo(f"address            : {r['address']}")
+    typer.echo(f"source root        : {r['source_root']}")
+    typer.echo(f"deployed selectors : {r['deployed_selector_count']}")
+    typer.echo(f"source selectors   : {r['source_selector_count']}")
+    typer.echo(f"shared             : {r['shared']}")
+    typer.echo(f"verdict            : {r['verdict']}")
+    if r["only_in_source"]:
+        typer.echo(f"only in source ({len(r['only_in_source'])}) : {r['only_in_source'][:12]}")
+    if r["only_in_deployed"]:
+        typer.echo(f"only in deployed ({len(r['only_in_deployed'])}): {r['only_in_deployed'][:12]}")
+        for sel, names in list(r.get("only_in_deployed_resolved", {}).items())[:20]:
+            if names:
+                typer.echo(f"    {sel} -> {', '.join(names)}")
