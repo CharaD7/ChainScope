@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from cli.cs_veck import CLASSES, _BY_ID, scan
+from cli.cs_veck import CLASSES, _BY_ID, _pattern_is_handled, scan
 
 VECK_FIXTURES = Path(__file__).parent / "fixtures" / "veck"
 
@@ -145,3 +145,62 @@ def test_multiline_hits_map_to_real_line_numbers(hits: list[dict]):
         p = VECK_FIXTURES / h["file"]
         total = len(p.read_text().splitlines())
         assert 1 <= h["line"] <= total, f"{h['file']}:{h['line']} out of range ({total} lines)"
+
+# --------------------------------------------------------------------------- #
+# class 14: captured return values are not unchecked returns
+# --------------------------------------------------------------------------- #
+# Found on LRTWithdrawalManager._transferAsset and the treasury-interest path:
+# `(bool sent,) = payable(to).call{value: amount}("");` followed by
+# `if (!sent) revert ...`. Class 14's strong pattern is just `\.call\s*\{\s*value`
+# and cannot tell that from an ignored return, because the two differ only in what
+# sits before the call. A detector that cries wolf on the value-transfer path
+# trains us to ignore it, so the veto is pinned in both directions.
+
+REAL = Path(__file__).parent / "fixtures" / "veck_real"
+
+
+def test_class14_ignores_captured_and_checked_call(tmp_path):
+    src = (REAL / "CheckedTransfer.sol").read_text()
+    p = tmp_path / "CheckedTransfer.sol"
+    p.write_text(src)
+    assert not [h for h in scan(tmp_path, class_ids=[14])]
+
+
+def test_class14_still_flags_ignored_call(tmp_path):
+    """The veto must not suppress the real bug it was added for."""
+    p = tmp_path / "UncheckedTransfer.sol"
+    p.write_text((REAL / "UncheckedTransfer.sol").read_text())
+    hits = scan(tmp_path, class_ids=[14])
+    assert hits, "an ignored low-level call must still be reported"
+    assert any(h["strength"] == "strong" for h in hits)
+
+
+@pytest.mark.parametrize(
+    "line,follow_up,expected_hit",
+    [
+        # captured AND then referenced -> handled, suppressed
+        ("(bool sent,) = to.call{value: v}(\"\");", "    if (!sent) revert E();", False),
+        ("(bool ok, bytes memory d) = to.call{value: v}(\"\");", "    if (!ok) revert E();", False),
+        # captured but never referenced -> still a genuine finding
+        ("(bool success, ) = to.call{value: v}(\"\");", "    emit Done();", True),
+        # never captured at all -> genuine finding
+        ("to.call{value: v}(\"\");", "    emit Done();", True),
+        ("address(t).call{value: v}(\"\");", "    emit Done();", True),
+    ],
+)
+def test_class14_window_check_discriminates_capture_forms(line, follow_up, expected_hit):
+    """Capture alone must not suppress; only capture-then-use counts as handled.
+
+    That distinction is the whole point of the window check.
+    `(bool success, ) = to.call{...}("")` with no later reference is what
+    cs_veck's own planted fixture contains, and it is a real finding - so a veto
+    that suppressed every capture would have silenced a genuine bug.
+    """
+    handled = _pattern_is_handled([line, follow_up], 0)
+    assert (not handled) is expected_hit, line
+
+
+def test_class14_window_check_ignores_a_reference_further_out():
+    """The window is deliberately short: a check 4 lines down is not a check."""
+    lines = ["(bool sent,) = to.call{value: v}(\"\");", "a();", "b();", "c();", "if (!sent) revert E();"]
+    assert _pattern_is_handled(lines, 0) is False

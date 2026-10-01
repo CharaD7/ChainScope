@@ -336,6 +336,66 @@ def _strip(line: str) -> str:
     return out.split("/*")[0]
 
 
+# Per-class veto: a match is suppressed when the surrounding line shows the
+# pattern is actually handled. Needed where "is this a bug" cannot be decided by
+# the presence of a token alone.
+#
+# Class 14 was the motivating case. Its strong pattern is just `\.call\s*\{\s*value`,
+# which cannot distinguish an ignored return from a captured-and-checked one,
+# because the two differ only in what sits BEFORE the call:
+#
+#     to.call{value: amt}("");                                  // ignored - a bug
+#     (bool sent,) = payable(to).call{value: amt}("");          // captured
+#     if (!sent) revert EthTransferFailed();                     // ...and checked
+#
+# A variable-length lookbehind would be needed for the regex, which Python's
+# `re` does not support. Matching this in the scanner instead keeps the class
+# pattern simple and makes the suppression explicit and testable. Without it,
+# LRTWithdrawalManager._transferAsset and the treasury-interest path were both
+# reported as unchecked-value-transfer bugs despite checking `sent` immediately.
+# Per-class veto: a match is suppressed when the surrounding context shows the
+# pattern is actually handled. Needed where "is this a bug" cannot be decided by
+# the presence of a token alone.
+#
+# Class 14 is the motivating case. Its strong pattern is just `\.call\s*\{\s*value`,
+# which cannot distinguish an ignored return from a captured-and-checked one,
+# because the two differ only in what surrounds the call:
+#
+#     to.call{value: amt}("");                                  // ignored  - a bug
+#     (bool success, ) = to.call{value: amt}("");                // captured, UNUSED - a bug
+#     (bool sent,) = to.call{value: amt}("");                    // captured
+#     if (!sent) revert EthTransferFailed();                     // ...and CHECKED
+#
+# Capture alone is not enough: the middle case is exactly what cs_veck's own
+# planted fixture contains, and it is a real finding. So suppression requires the
+# captured variable to actually be referenced shortly afterwards, which needs a
+# window across lines. Without this, LRTWithdrawalManager._transferAsset and the
+# treasury-interest path were both reported as unchecked-value-transfer bugs
+# despite checking `sent` immediately below.
+_CAPTURE_BEFORE_CALL = re.compile(
+    r"\(\s*bool\s+(\w+)\s*,?\s*\)\s*=\s*[^;]*\.call\b"
+    r"|\(\s*bool\s+(\w+)\s*,\s*[^;=]*\)\s*=\s*[^;]*\.call\b"
+)
+_PER_LINE_VETO: dict[int, re.Pattern[str]] = {}
+# classes whose hit is suppressed when the pattern is demonstrably handled
+_WINDOW_CHECK: dict[int, int] = {14: 3}
+_CALLED_IN_HANDLED = re.compile(r"\brequire\s*\([^;]*\.call|\.call\b[^;]*\bif\s*\(")
+
+
+def _pattern_is_handled(lines: list[str], idx: int) -> bool:
+    """True when the call on `lines[idx]` has its result captured AND used."""
+    m = _CAPTURE_BEFORE_CALL.search(lines[idx])
+    if not m:
+        # not a captured call - only suppressed if it is plainly guarded inline
+        return bool(_CALLED_IN_HANDLED.search(lines[idx]))
+    name = m.group(1) or m.group(2)
+    if not name:
+        return False
+    window = _WINDOW_CHECK.get(14, 3)
+    pat = re.compile(rf"\b{re.escape(name)}\b")
+    return any(pat.search(lines[j]) for j in range(idx + 1, min(idx + 1 + window, len(lines))))
+
+
 def scan(root: Path, class_ids: list[int] | None = None) -> list[dict[str, typing.Any]]:
     """Return ranked hits: {class_id, class, strength, file, line, snippet}.
 
@@ -381,6 +441,13 @@ def scan(root: Path, class_ids: list[int] | None = None) -> list[dict[str, typin
                 continue
             for cid in wanted:
                 cls = _BY_ID[cid]
+                # NB: not named `window` - that shadows the multiline window below
+                win = _WINDOW_CHECK.get(cid)
+                if win is not None and _pattern_is_handled(stripped, i - 1):
+                    continue
+                veto = _PER_LINE_VETO.get(cid)
+                if veto is not None and veto.search(code):
+                    continue
                 for strength in ("strong", "weak"):
                     for pat in cls[strength]:
                         if re.search(pat, code):
