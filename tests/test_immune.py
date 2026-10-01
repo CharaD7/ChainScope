@@ -16,6 +16,8 @@ import json
 import pytest
 
 from cli.cs_immune import (
+    MAX_SUBMITTABLE_BOUNTY_USD,
+    MIN_MEDIUM_PAYOUT_USD,
     severity_floor,
     submit_eligibility,
     _program_status,
@@ -415,13 +417,13 @@ def test_submission_fee_blocks():
 
 
 def test_pool_over_ceiling_blocks():
-    e = _elig(max_bounty=250_000.0)
+    e = _elig(max_bounty=MAX_SUBMITTABLE_BOUNTY_USD * 10)
     assert e["submittable"] is False
     assert any("POOL_OVER" in r for r in e["reasons"])
 
 
 def test_pool_exactly_at_ceiling_is_allowed():
-    assert _elig(max_bounty=100_000.0)["submittable"] is True
+    assert _elig(max_bounty=MAX_SUBMITTABLE_BOUNTY_USD)["submittable"] is True
 
 
 def test_unknown_pool_is_not_submittable():
@@ -430,7 +432,7 @@ def test_unknown_pool_is_not_submittable():
 
 
 def test_keizo_zeroes_ineligible_programs():
-    p = {"_slug": "big", "status": {"status": "LIVE"}, "maxBounty": 250_000,
+    p = {"_slug": "big", "status": {"status": "LIVE"}, "maxBounty": MAX_SUBMITTABLE_BOUNTY_USD * 5,
          "updated": "2026-09-01",
          "bounty": {"maxBounty": 250_000, "primacy": "primacy_of_impact",
                     "poc": "1", "kyc": "0", "assets": []}}
@@ -455,7 +457,7 @@ def test_keizo_keeps_score_for_eligible_program():
 # --------------------------------------------------------------------------- #
 
 def test_severity_floor_crit_when_medium_cheap():
-    r = severity_floor(100_000.0, 2_500.0)
+    r = severity_floor(MAX_SUBMITTABLE_BOUNTY_USD, 2_500.0)
     assert r["floor"] == "CRIT"
     assert "2,500" in r["reason"]
     assert r["crit_worth_chasing"] is True
@@ -473,7 +475,7 @@ def test_severity_floor_unknown_without_tier_data():
 
 
 def test_severity_floor_at_exactly_10k_is_high():
-    assert severity_floor(100_000.0, 10_000.0)["floor"] == "HIGH"
+    assert severity_floor(MAX_SUBMITTABLE_BOUNTY_USD, MIN_MEDIUM_PAYOUT_USD)["floor"] == "HIGH"
 
 
 def test_small_critical_is_not_worth_chasing():
@@ -488,7 +490,8 @@ def test_ceiling_uses_critical_tier_not_maxbounty():
     the wrong reasoning, and would block it outright if the tiers ever lined up
     the other way. The ceiling basis must be the top tier."""
     e = submit_eligibility({"status_code": "LIVE", "submission_fee_usd": 0,
-                            "max_bounty": 100_000.0, "critical_payout": 1_000_000.0})
+                            "max_bounty": 100_000.0,
+                            "critical_payout": MAX_SUBMITTABLE_BOUNTY_USD * 2})
     assert e["submittable"] is False
-    assert e["ceiling_basis"] == 1_000_000.0
+    assert e["ceiling_basis"] == MAX_SUBMITTABLE_BOUNTY_USD * 2
     assert any("POOL_OVER" in r for r in e["reasons"])

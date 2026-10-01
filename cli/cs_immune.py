@@ -51,12 +51,19 @@ _TTL = 24 * 3600
 
 # --- submission policy ------------------------------------------------------
 # Engagement rules, not facts about the world: we only submit to programs that
-# charge nothing to file a report, and only chase pools up to a $100k ceiling.
-# Encoding them here means a too-big or paid program can never reach the top of a
-# ranking. Two were lost to exactly this before it was a gate: a $250 submission
-# fee (Midas/Sherlock 122) and a $250k pool (Stacks) that was also Rust.
+# charge nothing to file a report, and chase a Critical tier up to $1M.
+#
+# The fee rule is free on Immunefi, so it excludes nothing and costs us nothing.
+# The ceiling is what was doing damage: at $100k it removed every serious Solidity
+# program, and the residue was small or formally verified (Silo runs 74 Certora
+# specs and ships 10 audit reports). Raised to $1M so the hunt targets match the
+# reward - a Critical is the only tier worth anything anywhere in the submittable
+# set, so the ceiling has to reach programs where Criticals actually live.
+#
+# Two programs were lost to this before it was enforced: a $250 filing fee
+# (Midas/Sherlock 122) and a $250k pool (Stacks) that was Rust regardless.
 SUBMISSION_FEE_MAX_USD = 0
-MAX_SUBMITTABLE_BOUNTY_USD = 100_000.0
+MAX_SUBMITTABLE_BOUNTY_USD = 1_000_000.0
 
 # Severity floor. Where a Medium pays less than this, a High or Medium is not
 # worth the hunt and the target has to be a Critical - so it is recorded per
