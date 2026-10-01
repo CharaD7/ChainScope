@@ -751,7 +751,26 @@ def _strip_comments(text: str) -> str:
 # 4. uninitialised-proxy / uninitialised-implementation detection
 # --------------------------------------------------------------------------- #
 
-_INIT_NAME = re.compile(r"^(initialize|init|setUp|setup|__init|reinitialize)", re.I)
+# Initializer names, matched narrowly.
+#
+# The first version matched anything starting with "init", which swept up
+# `initVersion()` - a pure view returning a version number. Calling it always
+# succeeds, so six LIVE production protocols were reported as UNINITIALIZED. A
+# name pattern alone cannot decide this; see uninitialized_probe for the
+# corroboration requirement.
+_INIT_NAME = re.compile(
+    r"^(initialize|init|setUp|__init|reinitialize)[A-Z]?[0-9]*$"
+    r"|^initialize[0-9]*$"
+    r"|^setUp$|^__init$|^reinitializer$",
+    re.I,
+)
+
+# Signatures whose successful call proves nothing: they are getters or version
+# readouts that cannot revert and cannot take ownership.
+_INIT_LOOKALIKE = re.compile(r"^(init|initialize)?(Version|Address|Nonce|Type|Owner|Status)$", re.I)
+
+# Getters that corroborate "already initialised" when non-zero.
+_STATE_PROBES = ("owner()", "admin()", "governance()", "getOwner()", "adminAddress()")
 # Revert payloads that prove an Initializable guard already fired. Matching the
 # rendered STRING is not enough: a contract declaring `error InvalidInitialization()`
 # makes `cast call` print the raw 4-byte selector, never the name. Both forms are
@@ -795,7 +814,10 @@ def initializer_selectors(code_hex: str, resolve: bool = True) -> list[dict[str,
         res = resolve_selectors(sel["dispatcher"])
         for s, names in res.items():
             for n in names:
-                if _INIT_NAME.match(n):
+                # match the function NAME, not the full signature: an anchored
+                # pattern applied to "initialize(address)" never matches
+                name_only = n.split("(")[0]
+                if _INIT_NAME.match(name_only) and not _INIT_LOOKALIKE.match(name_only):
                     out.append({"selector": s, "signature": n})
     return out
 
@@ -841,6 +863,16 @@ def uninitialized_probe(chain: str, address: str, *, max_args: int = 10) -> dict
             dummy = "0x1111111111111111111111111111111111111111 " * nargs
             ok, out = _call(chain, tgt, sig, dummy.strip())
             verdict = _classify_init_call(ok, out)
+
+            # CORROBORATION. A successful call alone is not evidence: getters
+            # always succeed, and so does any unguarded helper. Before claiming a
+            # takeover, require the target to actually look uninitialised - every
+            # ownership getter zero. Otherwise this is a candidate, not a verdict.
+            if verdict == "UNINITIALIZED" and not _INIT_LOOKALIKE.match(
+                sig.split("(")[0]
+            ):
+                if not _looks_uninitialized(chain, tgt):
+                    verdict = "INITIALIZED"
             results.append({
                 "address": tgt, "selector": sel, "signature": sig,
                 "args": nargs, "call_succeeded": ok, "verdict": verdict,
@@ -889,6 +921,27 @@ def _count_args(sig: str) -> int | None:
         elif ch == "," and depth == 0:
             count += 1
     return count
+
+
+def _looks_uninitialized(chain: str, address: str) -> bool:
+    """True only when every ownership getter is zero.
+
+    A proxy whose `owner()`/`admin()` is already set IS initialised, whatever a
+    successful call to some `init*` function suggests. Six live production
+    protocols were reported as UNINITIALIZED before this check existed.
+    """
+    saw_any = False
+    for fn in _STATE_PROBES:
+        ok, out = _call(chain, address, fn, timeout=30)
+        if not ok:
+            continue
+        saw_any = True
+        val = out.strip()
+        if not re.fullmatch(r"0x[0-9a-fA-F]{64}", val):
+            continue
+        if int(val, 16) != 0:
+            return False
+    return saw_any
 
 
 def _classify_init_call(ok: bool, out: str) -> str:

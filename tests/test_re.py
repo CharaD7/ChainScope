@@ -297,11 +297,13 @@ class TestUninitializedProbe:
         assert _count_args("initialize(address,(uint256,bytes))") == 2
 
     def test_init_name_filter(self):
+        """Names are matched on their own, never on the full signature."""
         from core.cs_re import _INIT_NAME
-        assert _INIT_NAME.match("initialize(address)")
-        assert _INIT_NAME.match("initialize2(uint256)")
-        assert _INIT_NAME.match("__init(address)")
-        assert not _INIT_NAME.match("deposit(uint256)")
+        for sig in ("initialize(address)", "initialize2(uint256)", "__init(address)",
+                    "init(address)", "setUp()"):
+            assert _INIT_NAME.match(sig.split("(")[0]), sig
+        assert not _INIT_NAME.match("deposit")
+        assert not _INIT_NAME.match("initConsolidated")
 
     def test_classify_reads_custom_error_selectors(self):
         """A contract using `error InvalidInitialization()` prints the raw
@@ -574,3 +576,46 @@ class TestFetchGuards:
         a = extract_metadata("0x" + "60" * 20 + "a264697066735822" + "1220" + "aa" * 32)
         b = extract_metadata("0x" + "60" * 20 + "a264697066735822" + "1220" + "bb" * 32)
         assert a["cid"] != b["cid"], "different digests must yield different CIDs"
+
+
+# --------------------------------------------------------------------------- #
+# 4 (hardened). false positives found by running the sweep
+# --------------------------------------------------------------------------- #
+# A bulk sweep over 188 in-scope addresses of 45 live programs reported SIX
+# UNINITIALIZED: Aevo, enzymefinance, and four `exactly` addresses. All six are
+# live production protocols and all six were wrong. Root cause: a single
+# successful eth_call was treated as proof, and the name pattern matched anything
+# starting with "init" - including `initVersion()`, a pure view that returns a
+# version number and therefore always succeeds.
+
+class TestUninitializedFalsePositives:
+    def test_version_getter_is_not_an_initializer(self):
+        """`initVersion()` is a view. Calling it always succeeds, so a probe that
+        trusts success alone reports every such contract as a takeover."""
+        from core.cs_re import _INIT_NAME, _INIT_LOOKALIKE
+        # two independent defences: the narrowed name pattern already rejects it,
+        # and the lookalike pattern rejects it if the pattern is ever widened
+        assert _INIT_LOOKALIKE.match("initVersion")
+        assert not _INIT_NAME.match("initVersion")
+
+    def test_init_name_pattern_is_narrow(self):
+        from core.cs_re import _INIT_NAME
+        for real in ("initialize", "initialize2", "init", "setUp", "__init", "reinitializer"):
+            assert _INIT_NAME.match(real), real
+        for not_init in ("initConsolidated", "initializeWithRole", "initialRate", "initOracle"):
+            assert not _INIT_NAME.match(not_init), not_init
+
+    def test_name_matching_ignores_the_signature(self):
+        """Regression: the pattern was applied to "initialize(address)" with an
+        anchored `$`, so it matched nothing and every probe returned
+        NO_INITIALIZER_FOUND - a detector that finds nothing while looking busy."""
+        from core.cs_re import _INIT_NAME
+        name_only = "initialize(address)".split("(")[0]
+        assert _INIT_NAME.match(name_only)
+
+    def test_successful_call_alone_is_not_a_verdict(self):
+        """The corroboration check exists so a live proxy can never be reported
+        as a takeover just because some init* function answers."""
+        from core.cs_re import _looks_uninitialized, _STATE_PROBES
+        assert _STATE_PROBES, "at least one ownership getter must be probed"
+        assert callable(_looks_uninitialized)
