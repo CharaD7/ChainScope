@@ -158,6 +158,39 @@ class REError(RuntimeError):
 # bytecode parsing
 # --------------------------------------------------------------------------- #
 
+# `cast call` does NOT return raw hex by default. It renders values human-readably:
+#   139264475815180962450438490 [1.392e26]
+# An earlier revision assumed `0x` + 64 hex and matched on that, so EVERY numeric
+# comparison silently failed: the value filter reported live vaults as empty, and
+# the uninit corroboration check could never reject. Parse properly instead.
+_CAST_ANNOT = re.compile(r"\s*\[[0-9.eE+-]+\]\s*$")
+
+
+def to_int(out: str) -> int | None:
+    """Parse a `cast call` result into an int, whatever form cast rendered it."""
+    if out is None:
+        return None
+    val = _CAST_ANNOT.sub("", out.strip()).strip()
+    if not val:
+        return None
+    if val.startswith("0x") or val.startswith("0X"):
+        body = val[2:]
+        return int(body, 16) if body else 0
+    try:
+        return int(val, 10)
+    except ValueError:
+        return None
+
+
+def to_addr(out: str) -> str | None:
+    """Extract an address from a `cast call` result."""
+    if not out:
+        return None
+    val = _CAST_ANNOT.sub("", out.strip()).strip()
+    m = re.search(r"0x[a-fA-F0-9]{40}", val)
+    return m.group(0) if m else None
+
+
 def _strip_hex(h: str) -> str:
     h = (h or "").strip()
     if h.startswith("0x") or h.startswith("0X"):
@@ -385,8 +418,9 @@ def resolve_proxy(chain: str, address: str) -> dict[str, t.Any]:
         out["kind"] = "BEACON"
         out["beacon"] = beacon
         ok, bimpl = _call(chain, beacon, "implementation()(address)")
-        if ok and re.fullmatch(r"0x[0-9a-fA-F]{40}", bimpl.strip()):
-            out["implementations"].append(bimpl.strip())
+        got = to_addr(bimpl) if ok else None
+        if got:
+            out["implementations"].append(got)
         out["notes"].append(
             "beacon proxy: the implementation can change without this address "
             "changing, so a review of today's implementation may not hold tomorrow"
@@ -936,11 +970,10 @@ def _looks_uninitialized(chain: str, address: str) -> bool:
         if not ok:
             continue
         saw_any = True
-        val = out.strip()
-        if not re.fullmatch(r"0x[0-9a-fA-F]{64}", val):
+        n = to_int(out)
+        if n is None or n == 0:
             continue
-        if int(val, 16) != 0:
-            return False
+        return False
     return saw_any
 
 
@@ -1544,3 +1577,59 @@ def identify_target(chain: str, address: str) -> dict[str, t.Any]:
     return {**ident, "chain": chain, "address": address,
             "expected_runtime": expected, "supported": ident.get("supported", False),
             "code_bytes": len(_strip_hex(code)) // 2}
+
+
+# --------------------------------------------------------------------------- #
+# value / liveness filter
+# --------------------------------------------------------------------------- #
+# A contract can implement ERC4626 perfectly and still be worth nothing: an
+# unconfigured base implementation, an already-exited strategy, a migrated pool.
+# The sweep flagged Yearn's TokenizedStrategy base (0xD377919F) purely because it
+# implements the interface - and that instance has totalSupply 0, totalAssets 0 and
+# reverts on balance(), want() and shutdown(). There is no user to harm and
+# nothing to freeze.
+#
+# Reading an empty contract is the single largest waste available in triage, so
+# value is checked before any source is read.
+
+VALUE_PROBES = (
+    "totalSupply()(uint256)",
+    "totalAssets()(uint256)",
+    "balance()(uint256)",
+    "totalDebt()(uint256)",
+    "totalValueLocked()(uint256)",
+    "getVirtualPrice()(uint256)",
+    "shares()(uint256)",
+    "stakedToken()(address)",
+)
+
+
+def has_value(chain: str, address: str, *, tolerance: int = 0) -> dict[str, t.Any]:
+    """Whether a contract appears to hold anything at all.
+
+    Reports WHAT answered and WHY it concluded empty, rather than a bare boolean:
+    "no probe answered" is a different fact from "every probe read zero", and
+    conflating them hides live contracts whose accessors are non-standard.
+    """
+    readings: dict[str, str] = {}
+    answered = 0
+    nonzero = 0
+    for fn in VALUE_PROBES:
+        ok, out = _call(chain, address, fn, timeout=40)
+        if not ok:
+            continue
+        answered += 1
+        val = out.strip()
+        readings[fn] = val
+        n = to_int(val)
+        if n is not None and n > tolerance:
+            nonzero += 1
+
+    if answered == 0:
+        return {"status": "UNKNOWN", "reason": "no value accessor answered",
+                "readings": readings, "live": None}
+    if nonzero == 0:
+        return {"status": "EMPTY", "reason": f"all {answered} value accessors read zero",
+                "readings": readings, "live": False}
+    return {"status": "HOLDS_VALUE", "reason": f"{nonzero}/{answered} accessors non-zero",
+            "readings": readings, "live": True}

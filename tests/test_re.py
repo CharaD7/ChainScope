@@ -619,3 +619,58 @@ class TestUninitializedFalsePositives:
         from core.cs_re import _looks_uninitialized, _STATE_PROBES
         assert _STATE_PROBES, "at least one ownership getter must be probed"
         assert callable(_looks_uninitialized)
+
+
+# --------------------------------------------------------------------------- #
+# cast output parsing
+# --------------------------------------------------------------------------- #
+# `cast call` does NOT return raw hex. It renders human-readably:
+#     139264475815180962450438490 [1.392e26]
+# Code that assumed `0x`+64 hex silently never matched, which made the value
+# filter report live vaults as EMPTY and left the uninit corroboration check
+# unable to reject anything - it looked like working hardening and was inert.
+
+class TestCastOutputParsing:
+    def test_annotated_decimal_is_parsed(self):
+        from core.cs_re import to_int
+        assert to_int("139264475815180962450438490 [1.392e26]") == 139264475815180962450438490
+
+    def test_plain_and_hex_forms(self):
+        from core.cs_re import to_int
+        assert to_int("0x01") == 1
+        assert to_int("42") == 42
+        assert to_int("0") == 0
+
+    def test_unparseable_returns_none_not_a_number(self):
+        from core.cs_re import to_int
+        assert to_int("") is None
+        assert to_int("execution reverted") is None
+        assert to_int(None) is None
+
+    def test_address_extraction_survives_annotations(self):
+        from core.cs_re import to_addr
+        a = "0x" + "ab" * 20
+        assert to_addr(f"{a} [1.0e18]") == a
+        assert to_addr("nope") is None
+
+    def test_value_filter_separates_empty_from_live(self):
+        """The control that would have caught this: a live vault must not read
+        as EMPTY."""
+        from core.cs_re import has_value
+
+        class Fake:
+            def __init__(self, values): self.values = values
+            def __call__(self, chain, addr, fn, timeout=40):
+                return (True, self.values[fn]) if fn in self.values else (False, "")
+        import core.cs_re as R
+        orig = R._call
+        try:
+            R._call = Fake({"totalSupply()(uint256)": "1000 [1.0e3]",
+                            "totalAssets()(uint256)": "2000 [2.0e3]"})
+            assert has_value("1", "0x1")["live"] is True
+            R._call = Fake({"totalSupply()(uint256)": "0", "totalAssets()(uint256)": "0"})
+            assert has_value("1", "0x1")["live"] is False
+            R._call = Fake({})
+            assert has_value("1", "0x1")["status"] == "UNKNOWN"
+        finally:
+            R._call = orig
