@@ -224,13 +224,45 @@ def iter_opcodes(code_hex: str) -> t.Iterator[tuple[int, str]]:
             i += 2
 
 
-def extract_selectors(code_hex: str, dispatcher_fraction: float = 0.5) -> dict[str, t.Any]:
-    """Pull PUSH4 constants, split into dispatcher candidates and other constants.
+def _selector(sig: str) -> str:
+    """4-byte selector for a signature, via `cast sig` (keeps keccak out of deps)."""
+    ok, out = _cast(["sig", sig])
+    s = out.strip()
+    if not ok or not s.startswith("0x") or len(s) != 10:
+        raise ValueError(f"could not compute selector for {sig!r}: {out!r}")
+    return s
 
-    A real dispatcher compares the calldata selector against a small table near
-    the top of the runtime code. PUSH4 values deeper in the code are usually
-    coincidental 4-byte windows of other data, so the two are reported separately
-    rather than merged into one confident-looking set.
+
+def extract_selectors(code_hex: str, dispatcher_fraction: float = 0.5) -> dict[str, t.Any]:
+    """Pull PUSH4 constants, split into dispatcher-region candidates and other constants.
+
+    .. warning::
+       **This is a constant scan, not a function list.** Do not treat
+       ``dispatcher`` as the contract's ABI, and do not report a deployed-vs-source
+       divergence on the strength of this function alone.
+
+       A legacy dispatcher compares the calldata selector directly and stores each
+       selector as a ``PUSH4`` immediate. Modern solc instead builds a **binary
+       search over range comparisons** (``GT``/``LE`` chains), so the ``PUSH4``
+       values sitting in the dispatcher region are comparison *bounds*. A selector
+       being dispatched correctly frequently has no literal in the code at all,
+       and a bound can coincidentally equal some unrelated known selector.
+
+       Verified against IPOR's deployed PowerToken implementation
+       (`0x78DBF1EA..`, Sourcify ``runtimeMatch: match``): this scan reported 42
+       "selectors", all of which resolved to plausible signatures via 4byte. On-chain
+       probing shows the real surface is very different - ``transfer``,
+       ``transferFrom``, ``allowance``, ``nonces``, ``delegate`` and ``approve`` all
+       **revert**, because ``PowerToken`` does not inherit ERC20 and is a
+       non-transferable staking receipt. Several of the "resolved" entries were
+       bounds that merely happened to match a well-known selector.
+
+    PUSH4 values past the dispatcher region are still separated into
+    ``other_constants``, since those are usually coincidental 4-byte windows of
+    unrelated data.
+
+    For ground truth on which functions actually exist, use :func:`probe_selectors`
+    (behavioural, via ``eth_call``) or Sourcify.
     """
     h = _strip_hex(code_hex)
     total = len(h) // 2
@@ -238,21 +270,58 @@ def extract_selectors(code_hex: str, dispatcher_fraction: float = 0.5) -> dict[s
     dispatcher: list[str] = []
     elsewhere: list[str] = []
     seen: set[str] = set()
-    for idx, (op, data) in enumerate(iter_opcodes(code_hex)):
+    offset = 0
+    for op, data in iter_opcodes(code_hex):
+        # `offset` is a byte position; comparing it against a byte-length cutoff is
+        # what the dispatcher-region split is meant to do. (An earlier version
+        # compared the *opcode index* against a byte count, which silently
+        # misclassified constants whenever the two units drifted apart.)
         if op == 0x63 and data and len(data) == 8:  # PUSH4
             sel = "0x" + data.lower()
-            if sel in seen:
-                continue
-            seen.add(sel)
-            if idx <= cutoff:
-                dispatcher.append(sel)
-            else:
-                elsewhere.append(sel)
+            if sel not in seen:
+                seen.add(sel)
+                (dispatcher if offset <= cutoff else elsewhere).append(sel)
+        offset += 1 + len(data) // 2 if data else 1
     return {
         "dispatcher": sorted(dispatcher),
         "other_constants": sorted(elsewhere),
         "code_bytes": total,
+        # explicit so callers cannot mistake this for a verified interface
+        "is_function_list": False,
     }
+
+
+def probe_selectors(
+    address: str,
+    signatures: list[str],
+    rpc_call: t.Callable[[str, str], str],
+) -> dict[str, bool]:
+    """Behavioural ground truth for which functions an address actually exposes.
+
+    Unlike :func:`extract_selectors`, this does not look at code at all: it sends a
+    real ``eth_call`` for each signature and records whether the node accepted it.
+    A revert means "no such reachable function", which for an optimised dispatcher
+    is the only reliable answer.
+
+    ``rpc_call(to, data) -> result_hex`` must raise or return a falsy/``0x`` value
+    on revert. Argument encoding is the caller's job, so pass signatures whose
+    arguments are all zero-valued or absent - enough to exercise the dispatcher.
+
+    Returns ``{signature: responded}``.
+    """
+    out: dict[str, bool] = {}
+    for sig in signatures:
+        try:
+            data = _selector(sig) if "0x" not in sig else sig
+        except Exception:
+            out[sig] = False
+            continue
+        try:
+            res = rpc_call(address, data)
+            out[sig] = bool(res) and res not in ("0x", "0x0")
+        except Exception:
+            out[sig] = False
+    return out
 
 
 def opcode_histogram(code_hex: str) -> dict[str, int]:

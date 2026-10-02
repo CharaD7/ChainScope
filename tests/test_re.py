@@ -23,6 +23,7 @@ from core.cs_re import (
     dangerous_ops,
     diff_bytecode,
     extract_selectors,
+    probe_selectors,
     infer_interfaces,
     is_minimal_proxy,
     iter_opcodes,
@@ -90,6 +91,79 @@ class TestSelectorExtraction:
     def test_handles_push32_without_garbage_selectors(self):
         sel = extract_selectors(_hex("7f" + "aa" * 32, "00"))
         assert sel["dispatcher"] == []
+
+    def test_result_is_explicitly_not_a_function_list(self):
+        """The scan must not be presentable as an ABI.
+
+        Modern solc builds a binary search over range comparisons, so PUSH4 values
+        in the dispatcher region are bounds, not selectors. Callers get told so
+        structurally rather than by reading the docstring.
+        """
+        code = _hex("6311223344", "11", "6355667788", "11", "00")
+        assert extract_selectors(code)["is_function_list"] is False
+
+    def test_dispatcher_split_uses_byte_offset_not_opcode_index(self):
+        """A PUSH4 past the byte cutoff must land in `other_constants`.
+
+        Each PUSH32 is 1 opcode but 33 bytes, so opcode index and byte position
+        drift apart. Ten PUSH32s put the next PUSH4 at byte offset ~330 (past the
+        0.5*len cutoff of ~168) while its opcode index is only ~10. The old
+        index-vs-byte-count comparison filed it under `dispatcher`.
+        """
+        code = _hex(*(["7f" + "aa" * 32] * 10), "63deadbeef", "00")
+        sel = extract_selectors(code)
+        assert "0xdeadbeef" in sel["other_constants"]
+        assert sel["dispatcher"] == []
+
+
+class TestSelectorProbing:
+    def test_probe_reports_response_behaviour(self):
+        """Behavioural probing is ground truth where the constant scan is not."""
+
+        def rpc_call(to, data):
+            if data.startswith("0x11223344"):
+                return "0x" + "00" * 32
+            raise RuntimeError("execution reverted")
+
+        # raw selectors are passed through, so no `cast` call is needed here
+        got = probe_selectors(
+            "0x0000000000000000000000000000000000000001",
+            ["0x11223344", "0xaabbccdd"],
+            rpc_call,
+        )
+        assert got["0x11223344"] is True
+        assert got["0xaabbccdd"] is False
+
+    def test_probe_treats_empty_return_as_absent(self):
+        def rpc_call(to, data):
+            return "0x"
+
+        got = probe_selectors(
+            "0x0000000000000000000000000000000000000001", ["0xdeadbeef"], rpc_call
+        )
+        assert got["0xdeadbeef"] is False
+
+    def test_probe_computes_selector_from_signature(self):
+        """A real signature is turned into a selector via cast."""
+        import subprocess
+
+        want = subprocess.run(
+            ["cast", "sig", "totalSupply()"], capture_output=True, text=True
+        ).stdout.strip()
+
+        seen = {}
+
+        def rpc_call(to, data):
+            seen["data"] = data
+            return "0x" + "01" * 32
+
+        got = probe_selectors(
+            "0x0000000000000000000000000000000000000001",
+            ["totalSupply()"],
+            rpc_call,
+        )
+        assert seen["data"] == want
+        assert got["totalSupply()"] is True
 
 
 class TestMinimalProxy:

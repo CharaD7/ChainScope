@@ -39,12 +39,34 @@ finding.
 | Implementation | `0x0a06ec4004c02fd514ee02c455d20062f7c45edc` |
 | Runtime size | 22,262 bytes |
 | `getVersion()` | **2002** |
-| Dispatcher selectors | 41 — 39 resolved, 2 are constants (`0x05f5e100` = 100e18, `0xffffffff` = uint256 mask) |
-| Functions in binary absent from source | **none** — no backdoor |
-| `DELEGATECALL` sites | 4, all from OZ UUPS `upgradeToAndCall`; zero `delegatecall` in project source |
+| Sourcify | `runtimeMatch: match` |
 | `reconcileAggregatedPowerUp(address[],int256[])` | **absent** — confirms the v2003 fix is not deployed |
+| `DELEGATECALL` sites | 4, all from OZ UUPS `upgradeToAndCall`; zero `delegatecall` in project source |
 
-Every selector in the binary maps to a source function. Nothing hidden.
+### Correction — the selector scan was not sound, and neither was the original claim
+
+An earlier version of this table reported "41 dispatcher selectors, 39 resolved, no
+function in the binary absent from source — no backdoor". **That was not a valid
+conclusion**, and it has been retracted.
+
+`extract_selectors` scans for `PUSH4` immediates. Modern solc does not emit a table
+of selectors — it builds a **binary search over range comparisons** (`GT`/`LE`
+chains), so those immediates are comparison *bounds*. A correctly-dispatched
+selector frequently has no literal in the code at all, and a bound can coincide
+with an unrelated known selector. Confirmed on IPOR's deployed PowerToken
+implementation (`0x78DBF1EA..`, Sourcify `runtimeMatch: match`): the scan reported
+42 "selectors", all of which 4byte-resolved to plausible signatures, while on-chain
+probing shows `transfer`, `transferFrom`, `allowance`, `nonces`, `delegate` and
+`approve` **all revert** — because `contract PowerToken is PowerTokenInternal,
+IPowerToken` does **not** inherit ERC20 and is a non-transferable staking receipt.
+Several "resolved" entries were bounds that merely happened to match a well-known
+selector.
+
+The "no backdoor" conclusion still stands, but it rests on **Sourcify
+`runtimeMatch: match`** — the implementation bytecode is proven to match verified
+source — not on the selector scan. `core/cs_re.py` now carries this warning, returns
+`is_function_list: False` so callers cannot mistake the output for an ABI, and ships
+`probe_selectors` for behavioural ground truth via `eth_call`.
 
 ## The PT_711 principal freeze is live
 
