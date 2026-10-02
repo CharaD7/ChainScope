@@ -276,6 +276,33 @@ CLASSES: list[dict[str, typing.Any]] = [
         "strong": [
             r"convertToShares\s*\([^)]*\+\s*1",
             r"virtualShares|virtualAssets|VIRTUAL_SHARES",
+            # single-line form of the vulnerable shape: a "total assets" slot assigned
+            # straight from this contract's own token balance. Matches xGamma
+            # (`totalGamma = gamma.balanceOf(address(this))`) and the Hypervisor's
+            # `getTotalAmounts` (`total0 = token0.balanceOf(address(this)).add(base0)`).
+            r"\w*[Tt]otal\w*\s*=\s*\w+\.balanceOf\s*\(\s*address\s*\(\s*this\s*\)\s*\)",
+        ],
+        # The two patterns below span identifiers on different lines, so they must
+        # live here: `strong`/`weak` are matched per stripped source line and can
+        # never fire on a cross-line shape.
+        "multiline": [
+            # --- the vulnerable shape itself, not just the presence of a mitigation ---
+            # Added after xGamma (Gamma, in scope): a Bancor-style checkpoints
+            # rebase token. Its enter/leave divide by a raw balanceOf(address(this))
+            # with no virtual offset, yet classes 4 and 19 both stayed silent
+            # because the only patterns here were the ERC4626 mitigations.
+            # PowerToken and the Hypervisor share the same shape and were found by
+            # hand, so a regex that only knows how to spot a *fix* misses the bug
+            # class it exists to find.
+            # Bancor checkpoints: enter/leave, or any mint/redeem pair.
+            r"function\s+(?:enter|leave)\w*\s*\([^)]*\)[\s\S]{0,900}?"
+            r"balanceOf\s*\(\s*address\s*\(\s*this\s*\)\s*\)[\s\S]{0,600}?\.div(?:ision)?\s*\(",
+            # share price derived from this contract's own idle token balance.
+            # The divisor need not be the first argument: IPOR's PowerToken does
+            # `MathOperation.division(balanceOfGovernanceToken * 1e18, baseTotalSupply)`,
+            # so the total/supply identifier can appear anywhere in the argument list.
+            r"balanceOf\s*\(\s*address\s*\(\s*this\s*\)\s*\)[\s\S]{0,900}?"
+            r"\.div(?:ision|mulDiv)?\s*\([^;]{0,160}?\w*[Tt]otal(?:Shares|Supply|Assets|Balance)?\b",
         ],
         "weak": [
             r"totalSupply\s*\(\s*\)\s*==\s*0",     # first-depositor guard = the MITIGATION

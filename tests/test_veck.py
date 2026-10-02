@@ -161,3 +161,101 @@ def test_plain_contract_does_not_trigger_aa_classes(tmp_path):
     f.write_text("contract C { function transfer(address a, uint256 v) external {} }")
     hits = scan(tmp_path)
     assert not ({20, 21} & {h["class_id"] for h in hits})
+
+
+# ---------------------------------------------------------------------------
+# Class 19: the vulnerable donation shape itself, not just the ERC4626 mitigation
+#
+# Added after xGamma (Gamma, in scope) went undetected. All three known
+# instances of this family - IPOR PowerToken, Gamma Hypervisor, Gamma xGamma -
+# must fire; a contract with the shape absent must not.
+# ---------------------------------------------------------------------------
+
+def _scan(tmp_path: Path, body: str, name: str = "T.sol") -> dict[int, list]:
+    p = tmp_path / name
+    p.write_text(body)
+    hits = scan(tmp_path, [19])
+    out: dict[int, list] = {}
+    for h in hits:
+        out.setdefault(h["class_id"], []).append(h)
+    return out
+
+
+def test_bancor_checkpoints_shape_detected(tmp_path):
+    """xGamma: enter/leave divide by a raw balanceOf(address(this)), no offset."""
+    body = """
+    contract xGamma {
+        IERC20 public gamma;
+        uint256 private _totalSupply;
+        function totalSupply() public view returns (uint256) { return _totalSupply; }
+        function enter(uint256 _amount) public {
+            uint256 totalGamma = gamma.balanceOf(address(this));
+            uint256 totalShares = totalSupply();
+            uint256 what = _amount.mul(totalShares).div(totalGamma);
+            _mint(msg.sender, what);
+            gamma.transferFrom(msg.sender, address(this), _amount);
+        }
+        function leave(uint256 _share) public {
+            uint256 totalShares = totalSupply();
+            uint256 what = _share.mul(gamma.balanceOf(address(this))).div(totalShares);
+            _burn(msg.sender, _share);
+        }
+    }
+    """
+    assert 19 in _scan(tmp_path, body)
+
+
+def test_divisor_may_not_be_first_argument(tmp_path):
+    """IPOR PowerToken passes the total supply as the second argument."""
+    body = """
+    contract PowerTokenInternal {
+        address private _governanceToken;
+        function totalSupplyBase() public view returns (uint256) { return 1; }
+        function _calculateInternalExchangeRate() public view returns (uint256) {
+            uint256 balanceOfGovernanceToken =
+                IERC20Upgradeable(_governanceToken).balanceOf(address(this));
+            uint256 baseTotalSupply = totalSupplyBase();
+            if (baseTotalSupply == 0) { return 1e18; }
+            return MathOperation.division(balanceOfGovernanceToken * 1e18, baseTotalSupply);
+        }
+    }
+    """
+    assert 19 in _scan(tmp_path, body)
+
+
+def test_total_assets_from_own_balance_detected(tmp_path):
+    """Gamma Hypervisor getTotalAmounts reads its own idle balance into total0."""
+    body = """
+    contract Hypervisor {
+        function getTotalAmounts() public view returns (uint256 total0, uint256 total1) {
+            total0 = token0.balanceOf(address(this)).add(base0).add(limit0);
+            total1 = token1.balanceOf(address(this)).add(base1).add(limit1);
+        }
+    }
+    """
+    assert 19 in _scan(tmp_path, body)
+
+
+def test_virtual_offset_still_recognised_as_mitigation(tmp_path):
+    """The original mitigation patterns must keep working."""
+    body = """
+    contract V {
+        uint256 internal constant VIRTUAL_SHARES = 1e3;
+    }
+    """
+    assert 19 in _scan(tmp_path, body)
+
+
+def test_plain_erc20_does_not_trigger_class19(tmp_path):
+    """A contract with no donation shape stays silent - no false positive."""
+    body = """
+    contract Plain {
+        mapping(address => uint256) public balanceOf;
+        function totalSupply() public view returns (uint256) { return 1; }
+        function transfer(address to, uint256 amt) public returns (bool) {
+            balanceOf[to] += amt;
+            return true;
+        }
+    }
+    """
+    assert _scan(tmp_path, body) == {}
