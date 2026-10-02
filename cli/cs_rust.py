@@ -404,6 +404,91 @@ def scan_swallowed_value_error(root: Path) -> list[dict[str, t.Any]]:
     return hits
 
 
+# --------------------------------------------------------------------------- R5
+#
+# Grounded in Hydration's own published post-mortem, not guesswork. Their
+# checklist theme #11: "saturating_sub/saturating_* hiding errors - saturating
+# math silently returns 0 on underflow instead of failing. This has led to
+# critical exploits where insufficient balances were silently accepted."
+#
+# The $500k aToken Critical was exactly that:
+#
+#     let diff = atoken_balance.saturating_sub(amount);   // amount is user-supplied
+#
+# so aToken transfers never failed for insufficient balance - saturating to 0
+# selected a "withdraw all" branch instead.
+#
+# But saturating arithmetic is NOT per se the bug. In the same pallet:
+#
+#     let remaining = MultiCurrency::unreserve_named(id, cur, who, value);
+#     let unreserved = value.saturating_sub(remaining);
+#
+# both operands derive from one operation and `remaining <= value` by
+# construction, so it can never saturate. Flagging that would be noise.
+#
+# The dangerous form is specifically: saturating arithmetic where one operand is
+# a *stored balance* and the other is an *externally supplied amount*. That is
+# the shape that turned an underflow into silent value creation.
+
+_BALANCE_OPERAND = re.compile(
+    r"(?:\b\w*balance\w*|\bfree_balance\b|\btotal_balance\b|\breserved\b|\bissuance\w*|\bdebt\b|"
+    r"\bcollateral\w*|\bamount_available\b|\bfunds\b)\s*$",
+    re.I,
+)
+# A function parameter that names an amount/value supplied by a caller.
+_AMOUNT_PARAM = re.compile(
+    r"\b(amount|value|qty|quantity|total|bonded|stake|weight|shares?)\w*\s*:\s*", re.I
+)
+_SATURATING = re.compile(
+    r"\b(?P<lhs>\w[\w.:\[\]()]*?)\.saturating_(?P<op>add|sub|mul|div|pow)\s*\(\s*(?P<rhs>[^;]*)\)"
+)
+
+
+def scan_saturating_on_supplied_amount(root: Path) -> list[dict[str, t.Any]]:
+    """R5: `saturating_*` between a stored balance and a caller-supplied amount.
+
+    The exact shape behind Hydration's $500k aToken Critical. Deliberately narrow:
+    requiring a balance-named operand on one side and an amount parameter in
+    scope on the other keeps it off the same-operation `value - remaining` idiom
+    in `currencies::unreserve_named`, which cannot underflow.
+    """
+    hits: list[dict[str, t.Any]] = []
+    for f in rust_files(root):
+        try:
+            text = f.read_text(errors="replace")
+        except OSError:
+            continue
+        for fname, line_no, body in _fn_bodies(text):
+            supplied = {m.group(1).lower() for m in _AMOUNT_PARAM.finditer(body.split("{", 1)[0])}
+            if not supplied:
+                continue
+            for ln_no, line in enumerate(body.splitlines(), 1):
+                for m in _SATURATING.finditer(line):
+                    lhs, rhs = m.group("lhs").strip(), m.group("rhs").strip()
+                    # normalise trailing method chains e.g. `self.free_balance(a)`
+                    lhs_leaf = re.split(r"[.:(]", lhs)[-1]
+                    rhs_leaf = re.split(r"[.:(]", rhs)[-1] if rhs else ""
+                    bal_side = bool(_BALANCE_OPERAND.search(lhs)) or bool(
+                        _BALANCE_OPERAND.search(rhs)
+                    )
+                    sup_side = (
+                        lhs_leaf.lower() in supplied
+                        or rhs_leaf.lower() in supplied
+                        or any(re.search(rf"\b{re.escape(s)}\b", lhs + rhs) for s in supplied)
+                    )
+                    if bal_side and sup_side:
+                        hits.append({
+                            "class_id": "R5",
+                            "class": "saturating math between a stored balance and a supplied amount",
+                            "fn": fname,
+                            "file": str(f),
+                            "line": line_no + ln_no,
+                            "snippet": line.strip()[:200],
+                            "severity_hint": "high",
+                        })
+    return hits
+
+
 # ------------------------------------------------------------------- driver
 
 SCANNERS = {
@@ -411,6 +496,7 @@ SCANNERS = {
     "R2": scan_donation_shape,
     "R3": scan_missing_origin_gate,
     "R4": scan_swallowed_value_error,
+    "R5": scan_saturating_on_supplied_amount,
 }
 
 

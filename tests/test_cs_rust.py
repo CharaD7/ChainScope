@@ -25,6 +25,7 @@ from cli.cs_rust import (
     scan_debug_assert,
     scan_donation_shape,
     scan_missing_origin_gate,
+    scan_saturating_on_supplied_amount,
     scan_swallowed_value_error,
     summary,
 )
@@ -324,3 +325,54 @@ def test_r4_catches_burn_from_swallowed(tmp_path):
         }
     """)
     assert len(scan_swallowed_value_error(tmp_path)) == 1
+
+
+# --------------------------------------------------------------------- R5
+#
+# Grounded in Hydration's own $500k post-mortem: `let diff =
+# atoken_balance.saturating_sub(amount)` where `amount` is caller-supplied, so
+# underflow silently selected a "withdraw all" branch and aToken transfers never
+# failed for insufficient balance. The detector must catch that shape and stay
+# off the same-operation `value - remaining` idiom that cannot underflow.
+
+
+def test_r5_catches_documented_atoken_shape(tmp_path):
+    _write(tmp_path, "lib.rs", """
+        fn transfer_a_token(currency_id: u32, who: u64, amount: Balance) -> DispatchResult {
+            let atoken_balance = T::Erc20Currency::free_balance(contract, who);
+            let diff = atoken_balance.saturating_sub(amount);
+            if diff.is_zero() { do_withdraw_all(currency_id, who)?; }
+            Ok(())
+        }
+    """)
+    hits = scan_saturating_on_supplied_amount(tmp_path)
+    assert len(hits) == 1
+    assert hits[0]["class_id"] == "R5"
+
+
+def test_r5_ignores_same_operation_idiom(tmp_path):
+    """`value - unreserve_named(...)` cannot underflow; flagging it is noise."""
+    _write(tmp_path, "lib.rs", """
+        fn unreserve_named(
+            id: &ReserveIdentifier,
+            currency_id: u32,
+            who: u64,
+            value: Balance,
+        ) -> Balance {
+            let remaining = T::MultiCurrency::unreserve_named(id, currency_id, who, value);
+            let unreserved = value.saturating_sub(remaining);
+            unreserved
+        }
+    """)
+    assert scan_saturating_on_supplied_amount(tmp_path) == []
+
+
+def test_r5_requires_a_supplied_amount_parameter(tmp_path):
+    """No caller-supplied amount in scope -> not the dangerous shape."""
+    _write(tmp_path, "lib.rs", """
+        fn classify(a: u128, b: u128) -> u128 {
+            let issuance_increase = total_issuance.saturating_sub(last_issuance);
+            issuance_increase.saturating_add(a)
+        }
+    """)
+    assert scan_saturating_on_supplied_amount(tmp_path) == []
