@@ -188,7 +188,14 @@ def scan_dynamic_field_key(root: Path) -> list[dict[str, t.Any]]:
 
 # --------------------------------------------------------------------- M3
 
-_CAP_DECL = re.compile(r"(?i)\bUpgradeCap\b")
+_CAP_DECL = re.compile(r"(?i)\b(UpgradeCap|TreasuryCap)\b")
+# Type names alone are not enough. `bluefin_coin::blue`'s `init` never names the
+# type: it calls coin::create_currency, binds the result to a local
+# `treasury_cap`, and transfers it. Keying on the capability *operations* as well
+# is what catches that, and it is the form a reader would search for anyway.
+_CAP_OPS = re.compile(
+    r"(?i)coin::create_currency|treasury_cap|mint_and_transfer|package::(issue|add_)"
+)
 _CAP_STORE = re.compile(
     r"(?i)(transfer::public_transfer|transfer::transfer|::transfer)\s*\(\s*[^,]*UpgradeCap|"
     r"fun\s+\w*(?:issue|grant|give|share|return)_?(?:upgrade_?)?cap\w*\s*\(",
@@ -197,7 +204,21 @@ _FREEZE = re.compile(r"(?i)\bfreeze\s*\(|::freeze\b|into_immutable\b|store_immut
 
 
 def scan_upgrade_authority(root: Path) -> list[dict[str, t.Any]]:
-    """M3: an UpgradeCap that is transferred or handed out rather than frozen."""
+    """M3: a capability that is transferred or handed out rather than frozen.
+
+    Covers **both** Sui authorities, not just `UpgradeCap`:
+
+      * `UpgradeCap`   - permission to publish new bytecode (the exact power an
+                         uninitialised proxy implementation hands away)
+      * `TreasuryCap`  - permission to **mint** an unbounded supply
+
+    The second was a real gap. M3 originally keyed on `UpgradeCap` only, so it
+    returned zero on `bluefin_coin::blue` - a 73-line token contract whose entire
+    security rests on a `TreasuryCap`, publicly transferred at init, never
+    frozen, with a deploy script that moves it to a single address. For a token
+    contract the mint authority is the one that matters, and the detector could
+    not see it.
+    """
     hits: list[dict[str, t.Any]] = []
     for f in move_files(root):
         try:
@@ -206,15 +227,27 @@ def scan_upgrade_authority(root: Path) -> list[dict[str, t.Any]]:
             continue
         if not _CAP_DECL.search(text):
             continue
+        # Any `fun`, not just public ones: Move requires `init` to be *private*, and
+        # `init` is precisely where a TreasuryCap is created and handed to the
+        # deployer. Restricting this to `public`/`entry` made M3 return zero on
+        # bluefin_coin::blue, whose only capability movement is inside `init`.
         for m in re.finditer(
-            r"(?m)^\s*(?:public(?:\s*entry)?|entry)\s+fun\s+(\w+)\s*(\([^)]*\))", text
+            r"(?m)^\s*(?:public(?:\s*entry)?|entry)?\s*fun\s+(\w+)\s*(\([^)]*\))", text
         ):
             name, params = m.group(1), m.group(2)
-            if not re.search(r"(?i)cap", name + params):
-                continue
             start = m.end()
             nxt = re.search(r"(?m)^\s*(?:public\s+)?(?:entry\s+)?fun\s+", text[start:])
             body = text[start : start + (nxt.start() if nxt else 3000)]
+            # The capability may be named in the signature, or - as in
+            # bluefin_coin::blue's `init(witness: BLUE, ctx: &mut TxContext)` -
+            # created inside the body and handed to the sender. Requiring it in
+            # the signature alone missed exactly that case.
+            if not (
+                re.search(r"(?i)cap", name + params)
+                or _CAP_DECL.search(body)
+                or _CAP_OPS.search(body)
+            ):
+                continue
             if not _CAP_STORE.search(body) and not re.search(
                 r"(?i)\btransfer\b|public_transfer", body
             ):
@@ -223,7 +256,7 @@ def scan_upgrade_authority(root: Path) -> list[dict[str, t.Any]]:
                 continue  # frozen caps are safe to hold
             hits.append({
                 "class_id": "M3",
-                "class": "UpgradeCap transferred or returned without freeze",
+                "class": "capability (UpgradeCap/TreasuryCap) transferred or returned without freeze",
                 "fn": name,
                 "file": str(f),
                 "line": text[: m.start()].count("\n") + 1,

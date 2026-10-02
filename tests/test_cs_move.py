@@ -213,3 +213,93 @@ def test_m1_still_fires_on_an_existing_parent(tmp_path):
     }
     """)
     assert len(scan(tmp_path, ["M1"])) == 1
+
+
+def test_m3_covers_treasury_cap_not_only_upgrade_cap(tmp_path):
+    """M3 originally keyed on UpgradeCap only, so it was blind to a token's
+    minting authority. Found by running it against bluefin_coin::blue, a 73-line
+    contract whose whole security rests on an unfrozen TreasuryCap."""
+    _write(tmp_path, """
+    module bluefin_coin::blue {
+        use sui::coin::TreasuryCap;
+
+        struct TreasuryCapHolder<phantom T> has key, store {
+            id: UID,
+            treasury: TreasuryCap<T>
+        }
+
+        public entry fun hand_off_holder(holder: TreasuryCapHolder<BLUE>, to: address) {
+            transfer::public_transfer(holder, to);
+        }
+    }
+    """)
+    hits = scan(tmp_path, ["M3"])
+    assert len(hits) == 1
+    assert "TreasuryCap" in hits[0]["class"] or "capability" in hits[0]["class"]
+
+
+def test_m3_still_catches_upgrade_cap(tmp_path):
+    _write(tmp_path, """
+    module 0x1::pkg {
+        use sui::package::UpgradeCap;
+        public fun grant_upgrade_cap(cap: UpgradeCap, to: address) {
+            transfer::public_transfer(cap, to);
+        }
+    }
+    """)
+    assert len(scan(tmp_path, ["M3"])) == 1
+
+
+def test_m3_catches_a_cap_handed_out_from_init(tmp_path):
+    """The real Bluefin shape.
+
+    `init` is required to be *private* in Move, and it never names the cap type -
+    it calls `coin::create_currency`, binds the result to `treasury_cap`, and
+    transfers it. Three separate detectors missed this: one keyed on
+    `UpgradeCap` only, one on `public`/`entry` funs only, and one on the
+    capability *type name* rather than the operation.
+    """
+    _write(tmp_path, """
+    module bluefin_coin::blue {
+        use sui::coin::{Self, Coin, TreasuryCap};
+        use sui::transfer;
+
+        struct TreasuryCapHolder<phantom T> has key, store {
+            id: UID,
+            treasury: TreasuryCap<T>
+        }
+
+        fun init(witness: BLUE, ctx: &mut TxContext) {
+            let (treasury_cap, metadata) = coin::create_currency<BLUE>(
+                witness, 9, b"BLUE", b"Bluefin", b"", option::none(), ctx);
+            transfer::public_share_object(metadata);
+            let holder = TreasuryCapHolder { id: object::new(ctx), treasury: treasury_cap };
+            transfer::public_transfer(holder, tx_context::sender(ctx))
+        }
+
+        public entry fun mint_tokens(
+            holder: &mut TreasuryCapHolder<BLUE>, amount: u64, recipient: address, ctx: &mut TxContext
+        ) {
+            let total_supply = coin::total_supply(&holder.treasury);
+            assert!(total_supply + amount <= MAX_SUPPLY, EMaxSupplyReached);
+            coin::mint_and_transfer(&mut holder.treasury, amount, recipient, ctx)
+        }
+    }
+    """)
+    hits = scan(tmp_path, ["M3"])
+    assert len(hits) == 1, f"expected the init handover, got {hits}"
+    assert hits[0]["fn"] == "init"
+
+
+def test_m3_ignores_a_frozen_cap_handed_from_init(tmp_path):
+    _write(tmp_path, """
+    module 0x1::locked {
+        use sui::package::UpgradeCap;
+        fun init(ctx: &mut TxContext) {
+            let cap = package::publish(witness);
+            transfer::public_transfer(cap, tx_context::sender(ctx));
+            cap.into_immutable();
+        }
+    }
+    """)
+    assert scan(tmp_path, ["M3"]) == []
