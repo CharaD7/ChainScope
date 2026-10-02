@@ -262,3 +262,91 @@ demonstrate extraction, and on the available evidence would not claim it.
 
 **Verdict: not submittable.** A documented, thrice-reported class, with the
 residual instance being a specific path the catalogue already names.
+
+---
+
+## Worked #2 (same-asset trades) and #3 (empty-pool division) — both clean
+
+### #2 `asset_in == asset_out` — protected at the creation layer, not the trade layer
+
+Their checklist rates this the highest-priority item: *"Always validate that
+trade/swap pair assets are distinct. **This has led to critical pool drains.**"*
+
+Audited every trade entry point across the DEX pallets:
+
+| Pallet | sell | buy | same-asset guard |
+|---|---|---|---|
+| omnipool | ✓ | ✓ | yes |
+| stableswap | ✓ | ✓ | yes |
+| route-executor | ✓ | ✓ | yes |
+| **xyk** | ✓ | ✓ | **none on the trade path** |
+| **lbp** | ✓ | ✓ | **none on the trade path** |
+
+XYK and LBP carry no same-asset check in `sell`/`buy`. The only guard in either
+pallet is at **pool creation** — `xyk:325` and `lbp:448`, both
+`ensure!(asset_a != asset_b, CannotCreatePoolWithSameAssets)`.
+
+That is sufficient, and worth stating precisely because it is not obvious from the
+trade code. With `asset_in == asset_out == X`:
+
+- XYK `validate_sell` resolves the pool via `Self::exists(assets)` (`xyk:786`) →
+  no X/X pool can exist → `TokenPoolNotFound`
+- LBP resolves via `PoolData::try_get(&pool_id)` (`lbp:810`) → `PoolNotFound`
+
+So the same-asset trade is unreachable. The invariant is supplied one layer away
+from where their checklist expects to see it. Defence-in-depth would put a check
+on the trade path too, but a redundant check is not a bounty finding, and calling
+this a critical pool drain would be wrong.
+
+**Verdict: no finding.** The class is real, and it has burned them before — but
+these two pallets are held by a sound creation-layer invariant.
+
+### #3 Division by zero on emptied pools — minimum-reserve invariants present
+
+XYK has `MinPoolLiquidity` as a `Config` type, enforced at pool creation
+(`xyk:321`) **and maintained across withdrawals** (`xyk:659-661`):
+
+> "Account's liquidity left should be either 0 or at least MinPoolLiquidity"
+
+so a withdrawal can never strand the pool with a dust remainder below the floor.
+
+Omnipool has no `MinPoolLiquidity` config but requires a floor at `add_token`
+(`omnipool:510-512`): `ensure!(ed > 0 && amount >= ed.saturating_mul(20),
+MissingBalance)` — a token cannot enter the pool with less than 20× existential
+deposit. On top of that, 53 `checked_div` / `DivisionByZero` / `ArithmeticError`
+guards in the pallet, with the `checked_div(...).ok_or(...)` idiom used
+consistently on reserve ratios.
+
+**Verdict: no finding.** Both pools hold a floor and guard division explicitly.
+The catalogue's adjacent item — "LP exit blocked by MinPoolLiquidity (Major)" — is
+the other side of that same trade-off, and is a known characteristic rather than a
+new finding.
+
+## Standing position after six checklist themes
+
+| # | Theme | Result |
+|---|---|---|
+| 1 | Direct transfers bypass hooks | clean — no unhooked path into pool accounts |
+| 2 | `asset_in == asset_out` | clean — invariant at pool creation, not trade path |
+| 3 | Division by zero on empty pools | clean — minimum-reserve floors + 53 division guards |
+| 4 | Slippage gaps | opt-in variants + privileged protocol path; trait path is a known class |
+| 5 | Oracle hook coverage | clean — `on_liquidity_changed` / `on_trade` on every mutator |
+| 14 | Confused deputy | defended in the shared handler, not the wrapper |
+
+Six of fourteen worked, all closed with a specific reason. Four required reading
+code rather than pattern-matching, and **two of the four first looked like
+reportable findings** — `withdraw_shares` (a duplicate of Hydration's own $200k
+report) and the `StableswapLiquidityMutation` zero-`min_shares` path (a
+triply-reported class). Both were closed only by tracing to the layer that actually
+carries the invariant, and in the second case by reading the target's own
+catalogue.
+
+Eight themes remain: #6 amplification rate-limiting, #7 amplification sandwich,
+#8 existential-deposit awareness, #9 EVM/Substrate boundary, #10 privileged-role
+impact, #11 `saturating_*` (covered by R5 — clean), #12 multi-block oracle attacks
+via transaction ordering, #13 scope creep in shared layers.
+
+Of those, **#9 (EVM/Substrate boundary)** and **#12 (multi-block oracle attacks)**
+are the two with payout precedent: #12 *is* the $25k post-mortem, and #9 covers
+`pallet-evm-accounts`, `pallet-contracts`, and the ERC20 mapping that a 2024
+Pashov audit already found a High in.
