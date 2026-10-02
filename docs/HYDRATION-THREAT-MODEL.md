@@ -350,3 +350,88 @@ Of those, **#9 (EVM/Substrate boundary)** and **#12 (multi-block oracle attacks)
 are the two with payout precedent: #12 *is* the $25k post-mortem, and #9 covers
 `pallet-evm-accounts`, `pallet-contracts`, and the ERC20 mapping that a 2024
 Pashov audit already found a High in.
+
+---
+
+## Worked #9 (EVM/Substrate boundary) — no finding
+
+### Address-space truncation — the strongest candidate, and already theirs
+
+`pallets/evm-accounts` uses a two-namespace design:
+
+- **truncated**: `b"ETH\0"` + 20-byte EVM address + 8 zero bytes
+- **bound**: 20-byte EVM address + 12-byte `AccountExtension` suffix
+
+with `evm_address()` branching on `_is_evm_account`, which requires **two**
+conditions — `account_id[0..4] == b"ETH\0" && account_id[24..32] == [0u8; 8]`.
+The second condition is the point: a bound account would have to both begin
+`0x45544800` *and* have 8 trailing zero bytes, and the extension is not
+user-supplied. The namespaces cannot collide. The same rule is replicated in
+`runtime/hydradx/src/evm/synthetic_logs.rs:286`.
+
+### ERC20 synthetic-address namespace — real collision, already documented
+
+`HydraErc20Mapping::encode_evm_address` builds `0x00…00 01 <asset_id BE>` with the
+marker at **byte 15**, and `is_asset_address` matches the first 16 bytes against
+the same pattern. I mis-counted the marker position by eye first and was
+disproved by executing the round trip — `0→0`, `1→1`, `0x1234→0x1234`,
+`0xDEADBEEF→0xDEADBEEF` all exact. The 20-byte-into-`u32` loop looks wrong but is
+correct: `<<8` truncates, leaving exactly `bytes[16..19]`.
+
+**But a correct round trip is not an exclusive namespace.** An EVM address is
+user-chosen, and a user can pick one matching the synthetic pattern — e.g.
+`0x00000000000000000000000000000001deadbeef` — which `is_asset_address` accepts
+and decodes to asset `0xDEADBEEF`. Since `address_to_asset` tries
+`decode_evm_address` **first**, a colliding user address shadows the registry
+lookup.
+
+`address_to_asset` is consumed in exactly the sensitive places:
+`ice/amm-simulator/uniswap_v3.rs:259-260` (resolves pool tokens),
+`runtime/hydradx/src/lib.rs:1197-1198` (resolves aToken/reserve), and
+`evm/aave_trade_executor.rs:167,174` — the AAVE path, where the $500k aToken
+Critical lived.
+
+**Not a finding.** Hydration's own catalogue lists it under theme #9:
+
+> **EVM/Substrate address mapping truncation (Informational)** — "Converting
+> between 32-byte Substrate and 20-byte EVM addresses truncates entropy,
+> **theoretically enabling collisions and fund loss**."
+
+And the audit table records `2024-10 | Pashov | ERC20 Mapping | 1 high + 3 medium +
+5 low`. The class is identified, the component is audited, and the project rates
+the residual collision Informational. Reporting it would be re-reporting a
+documented, accepted issue.
+
+### Other theme #9 items already listed
+
+`ERC20 return value not verified (Medium)` — `handle_result()` doesn't verify
+ERC20 return values — and the EVM migration weight blowup are both catalogued,
+with sources. No new ground.
+
+## Session close
+
+Seven of fourteen themes worked: #1, #2, #3, #4, #5, #9, #14. All closed with a
+specific reason. Five detectors across 718 files / 260,665 lines: zero actionable
+findings. **No novel finding on a $222,222-ceiling programme that has paid
+$500k and $25k on two of the exact classes hunted here.**
+
+The dominant failure mode was never missing a bug — it was **tending toward
+filing a duplicate**. Concretely:
+
+| Candidate | What it actually was |
+|---|---|
+| `withdraw_shares` lacks cross-validation | defended in the shared handler — duplicate of their own $200k report |
+| `StableswapLiquidityMutation` zero `min_shares` | a class reported 3× over (Code4rena M-03, RV A6, OAK #5) |
+| ERC20 synthetic-address collision | catalogued as Informational; component audited by Pashov |
+| `calculate_target_fee` `saturating_div` | fail-safe by saturation direction |
+| `can_mint` `saturating_add` | saturation *blocks* the mint |
+| same-asset trades in xyk/lbp | invariant held at pool creation, not the trade path |
+
+Six candidates, all closed by tracing to the layer that actually carries the
+invariant, or by reading the target's own catalogue. Four of them would have been
+filed as findings on the strength of a single-file read.
+
+That is the transferable lesson, and it is not specific to this target: **on a
+heavily-audited programme, the highest-value step is not another pattern but
+finding where the invariant actually lives, and whether the maintainers have
+already documented it.**
