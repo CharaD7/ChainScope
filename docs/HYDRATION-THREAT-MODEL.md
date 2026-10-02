@@ -115,3 +115,84 @@ regex. That is also why the Dwellir endpoint in referendum #419 would matter
 more than any further static work: it would let `cs_substrate.py` answer whether
 a candidate is live, which is the evidence that killed three separate findings
 this session.
+---
+
+## Worked the checklist: three themes, three closures
+
+Each theme from Hydration's own auditor checklist, read rather than regexed.
+
+### #14 Confused deputy — defended, at a layer I initially missed
+
+Started from the fixed instance to learn the signature. `redeposit_shares`
+(`pallets/xyk-liquidity-mining/src/lib.rs:873`) has the cross-validation:
+
+```rust
+let (shares_amount, deposit_amm_pool_id) = ...redeposit_lp_shares(...);
+ensure!(amm_pool_id == deposit_amm_pool_id, Error::<T>::InvalidAssetPair);
+```
+
+`withdraw_shares` (`:950`) does **not** — it derives `amm_pool_id` from the
+user-supplied `asset_pair` and passes it straight into `withdraw_lp_shares` with
+no local check. That looked like the $200k bug, unfixed, still reachable.
+
+**It is not.** The check lives one layer down in the shared handler:
+
+```rust
+// pallets/liquidity-mining/src/lib.rs:1329
+ensure!(amm_pool_id == deposit.amm_pool_id, Error::<T, I>::AmmPoolIdMismatch);
+```
+
+Call chain verified: XYK extrinsic → trait `withdraw_lp_shares` (`:1986`) →
+`Self::withdraw_lp_shares` (`:2004`) → the `Deposit::try_mutate_exists` body at
+`:1315` containing the check. Because it sits in the shared handler, it protects
+both `xyk-liquidity-mining` and `omnipool-liquidity-mining`.
+
+**This was my near-miss of the session.** Reporting `withdraw_shares` as an
+unfixed $200k confused-deputy would have been a duplicate of a report Hydration
+itself filed. The distinction that saved it: grepping for the *fix* tells you
+where they put the check in one file, but the check may be an invariant of a
+shared layer. Always trace the call chain before calling a layer unpatched.
+
+### #4 Slippage gaps — the named gaps are opt-in, not missing
+
+| Function | Bound |
+|---|---|
+| `add_liquidity_with_limit(asset, amount, min_shares_limit)` | min ✓ |
+| `remove_liquidity_with_limit(position_id, amount, min_limit)` | min ✓ |
+| `add_liquidity(origin, asset, amount)` | none — opt-in variant |
+| `remove_liquidity(position_id, amount)` | none — opt-in variant |
+| `withdraw_protocol_liquidity(asset_id, amount, price, dest)` | `AuthorityOrigin` |
+
+The checklist says to *check* `remove_liquidity`, `add_liquidity` and
+`withdraw_protocol_liquidity`. Checked: the first two are the deliberate
+no-limit convenience variants with safe siblings — the same design as Gamma's
+`deposit`/`depositWithLimit`, and a user opting out of protection is not a bug.
+
+`withdraw_protocol_liquidity` is gated by `T::AuthorityOrigin` — governance
+withdrawing the protocol's own liquidity does not need MEV protection from
+itself. Its `price: (Balance, Balance)` is **not** a limit at all: it rebuilds a
+`Position` whose real fields were lost when a position was sacrificed, per the
+dev note. No accepted-but-ignored limit parameter.
+
+### #1 Direct transfers bypass hooks — none found
+
+Zero direct `Currency::transfer` calls into `protocol_account` / pool accounts in
+`pallets/omnipool`. All three hooks (`on_liquidity_changed`, `on_trade`,
+`on_trade_fee`) are documented and invoked on the extrinsic paths. The
+`currencies` pallet's transfers to `ReserveAccount` are the reserve mechanism
+itself, and the code states the invariant explicitly: *"The total of all receipts
+for an asset must stay equal to the reserve account's erc20 balance."*
+
+## Standing position
+
+No finding from any of the three. The value was the method rather than the
+outcome: each theme was a named, high-prioritised shape from the target's own
+list, and each closed on a specific reason — a shared-layer invariant, a
+deliberate opt-in, and a privileged caller. One of them nearly produced a
+duplicate report.
+
+Three themes remain genuinely unworked in the checklist: #2 `asset_in == asset_out`
+in paths other than Omnipool's `sell`, #3 division-by-zero on empty pools, and
+#5 oracle-hook coverage for every reserve-changing operation. Those are the next
+reads, and #5 is the largest — it is the theme the $25k post-mortem actually
+exploited.
