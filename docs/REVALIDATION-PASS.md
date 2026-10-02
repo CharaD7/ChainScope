@@ -39,7 +39,14 @@ other two addresses in the repo — `0x07ebc28f…` and `0x92f8964e…` — have
 any of mainnet / optimism / arbitrum / polygon / celo**, so they are not deployed
 Gamma contracts either.
 
-So the conclusion cannot be checked, and if it was wrong nothing would now detect it.
+**Correction, 2026-10-02.** "Lost" was wrong. The addresses are in the cached Immunefi
+catalogue under `_seg.assets`; my grep missed them because `name` is null and only
+`slug`/`assets` carry the data. Gamma is **live** (`pausedAt: null`, `endDate: null`,
+**maxBounty $50,000**) with xGamma `0x26805021…`, Hypervisor `0xa8076ae3…`, UniProxy
+`0x83de646a…`. The lesson below stands - the addresses should have been committed when
+the conclusion was - but the conclusion is in fact re-checkable. See
+[GAMMA-SWEEP.md](GAMMA-SWEEP.md): re-running the 21 classes found a real no-virtual-offset
+pattern in the Hypervisor share math that the original proxy-only check never examined.
 
 **The process gap is the actual finding.** IPOR and mETH have their reasoning, PoCs
 and deployed evidence committed to `docs/` and `poc/`. Gamma has a cloned repo, some

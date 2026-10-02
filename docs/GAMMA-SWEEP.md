@@ -1,0 +1,124 @@
+# Gamma — 21-class sweep and the first-depositor finding
+
+Answers "was Gamma actually covered?" **It was not.** The earlier note reverse-engineered
+three addresses, concluded "direct, non-proxy", and Gamma was closed. The 21 Critical
+classes and reverse engineering were never run against the Hypervisor source. Closing it
+on that basis was premature. This is the correction.
+
+## Correction — the addresses were not lost
+
+[REVALIDATION-PASS.md](REVALIDATION-PASS.md) concluded the Gamma addresses were
+unrecoverable. That was wrong: they are in the cached Immunefi catalogue under
+`_seg.assets`. My grep missed them because `name` is null and only `slug`/`assets`
+carry the data.
+
+**The programme is live:** `pausedAt: null`, `endDate: null`, **maxBounty $50,000**,
+launched 2021-10-08, `proofOfConceptType: required`, `primacy_of_rules`.
+
+| Asset | Address |
+|---|---|
+| xGamma | `0x26805021988F1a45dC708B5FB75Fc75F21747D8c` |
+| **Hypervisor** | `0xa8076ae31e4b6c64d07b1ed27889924a962a70d3` |
+| UniProxy | `0x83de646a7125ac04950fea7e322481d4be66c71d` |
+
+$50,000 is 50x IPOR's flat $1,000 Critical, and makes Gamma the highest-value target in
+the portfolio. It should not have been closed on a three-address proxy check.
+
+## 21 classes over `hypervisor/contracts` (20 files)
+
+| Class | Hits | Note |
+|---|---|---|
+| 1 Uninitialized proxies | 1 | `IUniversalVault.initialize()` — an interface declaration. False positive. |
+| 4 Rounding/inflation in share ratios | **1** | `ClearingV2.sol:169` — see below. |
+| 19 Vault donation / first-depositor | **1** | same location. |
+| 13 Bridge proof verification | 2 | No bridge in the codebase. False positive. |
+| 18 Swap slippage/MEV | 4 | — |
+| 3 Oracle manipulation | 12 | — |
+| 9 Token handling | 14 | — |
+| 16 Flash-loan price manipulation | 27 | — |
+| 2 Read-only reentrancy | 44 | — |
+| 7 Access control | 53 | — |
+| 17 Concentrated-liquidity pool math | 112 | Every position uses `TickMath`. Structural noise. |
+
+The rare classes are the signal, and both land on the same place.
+
+## The finding: no virtual offset in `getTotalAmounts`
+
+`Hypervisor.sol:490`:
+
+```solidity
+function getTotalAmounts() public view returns (uint256 total0, uint256 total1) {
+    (, uint256 base0, uint256 base1) = getBasePosition();
+    (, uint256 limit0, uint256 limit1) = getLimitPosition();
+    total0 = token0.balanceOf(address(this)).add(base0).add(limit0);   // raw idle balance
+    total1 = token1.balanceOf(address(this)).add(base1).add(limit1);
+}
+```
+
+Share minting divides by exactly that (`Hypervisor.sol:139-142`):
+
+```solidity
+uint256 total = totalSupply();
+if (total != 0) {
+    uint256 pool0PricedInToken1 = pool0.mul(price).div(PRECISION);
+    shares = shares.mul(total).div(pool0PricedInToken1.add(pool1));
+}
+```
+
+No virtual offset, no dead shares, no minimum. **A plain `token.transfer` to the
+Hypervisor inflates "total assets" with zero shares minted.** Withdrawals distribute the
+idle balance pro-rata (`Hypervisor.sol:250-251`), so the donation is claimable by
+shareholders.
+
+Deposits are gated by `whitelistedAddress` (`:120`) and `nonReentrant`, but **a donation
+needs no permission at all** — it is an ERC-20 transfer, not a call into the vault. And
+the seeder can be first: `ClearingV2.getDepositAmount` returns `amountStart = 0` for an
+empty vault (`:169-170`), so `clearDeposit`'s ratio check passes with 1 wei on both
+sides. `Hypervisor.deposit` itself only requires `deposit0 > 0 || deposit1 > 0`.
+
+This is precisely classes 4 and 19, and the same family as the PowerToken and sDAI
+exposure — except the prize is 50x larger.
+
+## Why it is still not exploitable on the in-scope vault
+
+Donating `D` inflates total value `T`; a victim depositing `V` is diluted by `D/(T+D)`.
+An attacker holding fraction `f` of shares nets:
+
+```
+net = -D + f * V * D/(T+D)   >  0   iff   f * V > T + D
+```
+
+Deployed state of `0xa8076ae3…`, read live:
+
+| | |
+|---|---|
+| `totalSupply()` | 10,718,387,889,727,316,900 (≈10.72) |
+| `getTotalAmounts()` | token0 8785.77, token1 2668.27 |
+| token0 / token1 | `0xae78736c…` / `0xc02aaa39…` (stETH / WETH) |
+| `directDeposit()` | false |
+| `deposit0Max()` | max uint256 |
+
+`getTotalAmounts` and `deposit(uint256,uint256,address,address,uint256[4])` are both
+present in the deployed bytecode. This is a **mature vault holding ~11.45 units**, so `f`
+is small for any new entrant. Working the numbers: at `f = 1%` with `D ≈ 11.45`, the
+attacker must donate their way to break-even only if a victim deposits **>2,290 units
+into an 11-unit vault** — a >200x whale deposit. Contrived rather than practical, and the
+attacker must induce it.
+
+**Same `f < 1` wall as PowerToken.** The donation is real backing that the donor can
+recover only in proportion to the shares they hold, and holding ~all the shares is
+unreachable once the vault has users.
+
+It is live only where the attacker can be sole holder — a freshly deployed Hypervisor.
+Whether new Hypervisor addresses fall inside the listed-asset scope is a scope question I
+have not resolved, and it decides whether this is reportable at all.
+
+## Verdict
+
+A genuine hardening gap — same class as the PowerToken exposure, correctly identified by
+the 21-class sweep — but **not exploitable against the in-scope deployed vault**, and
+not reportable without resolving whether newly-deployed Hypervisors are in scope.
+
+What this pass actually changes is the triage verdict, not the finding. Gamma is live,
+carries a **$50,000** ceiling, and was closed on a proxy check that never examined the
+share math. It should be re-opened as an active target.
