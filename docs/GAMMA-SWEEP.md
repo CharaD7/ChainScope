@@ -195,3 +195,98 @@ Nothing found. The one genuinely interesting pattern — no virtual offset in
 
 Gamma should not be closed, though: it carries a $50,000 ceiling, and xGamma is an
 in-scope contract that has never been looked at in this session.
+
+---
+
+## xGamma (`0x26805021…`) — the third in-scope contract
+
+Source obtained from Sourcify: `creationMatch: exact_match`, `runtimeMatch: exact_match`,
+verified 2024-08-08. Single file `contracts/xGamma.sol`, 759 lines, **Solidity 0.6.12,
+optimizer disabled**, `proxyResolution.isProxy: false`. So this is the *verified deployed*
+source, not a repo copy.
+
+It is a Bancor-style checkpoints rebase token, not an ERC4626:
+
+```solidity
+function enter(uint256 _amount) public {
+    uint256 totalGamma = gamma.balanceOf(address(this));
+    uint256 totalShares = totalSupply();
+    if (totalShares == 0 || totalGamma == 0) {
+        _mint(msg.sender, _amount);
+    } else {
+        uint256 what = _amount.mul(totalShares).div(totalGamma);
+        _mint(msg.sender, what);
+    }
+    gamma.transferFrom(msg.sender, address(this), _amount);
+}
+
+function leave(uint256 _share) public {
+    uint256 totalShares = totalSupply();
+    uint256 what = _share.mul(gamma.balanceOf(address(this))).div(totalShares);
+    _burn(msg.sender, _share);
+    gamma.transfer(msg.sender, what);
+}
+```
+
+No virtual offset, no dead shares, no minimum, and `enter`/`leave` are permissionless.
+`totalGamma` is read **before** the transfer in, so a depositor cannot self-inflate the
+denominator — only a third-party donation can. That is the same shape as PowerToken and
+Hypervisor.
+
+Live state, read from mainnet:
+
+| | |
+|---|---|
+| `gamma()` | `0x6BeA7CFEF803D1e3d5f7C0103f7ded065644e197` |
+| `totalSupply()` | 36,372,625.43 (3.637e25) |
+| GAMMA held | 45,052,475.62 (4.505e25) |
+| name / symbol | xGamma / xGAMMA |
+
+### The attack is impossible for f < 1 — proven, not estimated
+
+Attacker holds fraction `f` of shares, donates `D` into a vault of value `T`, victim
+deposits `V`:
+
+```
+attacker net = -D + f * V * D/(T+D+V)  >  0   iff   V*(f-1) > T + D
+```
+
+With `f < 1`, `V*(f-1)` is **negative** while `T + D` is positive. The inequality cannot
+hold. Unlike the earlier estimates, this is an algebraic impossibility, not a judgement
+call about magnitudes — no donation size and no victim size change it.
+
+It is live only at `f = 1`, i.e. the attacker is the sole holder or the first depositor.
+xGamma's `totalSupply` is 3.637e25 with real backing, so neither is reachable: an
+attacker cannot enter first, and cannot acquire existing shares without paying for them.
+
+### Other angles checked and closed
+
+- **CEI violation in `enter`** — `_mint` happens *before* `gamma.transferFrom` (`:744-749`),
+  and the transfer's return value is unchecked. A token that returns `false` instead of
+  reverting would hand out free shares. GAMMA **reverts** (`ERC20: transfer amount
+  exceeds allowance`, `0x08c379a0…`), verified by `eth_call`, so this is not reachable.
+  `gamma` is also assigned only in the constructor — the ABI has **no setter** — so a
+  hostile token cannot be substituted.
+- **Overflow** — 0.6.12 predates built-in checks, but `enter`/`leave` use SafeMath
+  `.mul`/`.div`/`.sub`, all of which revert on overflow.
+- **`totalGamma == 0` branch** — would mint 1:1 while shares exist, dilating holders.
+  Unreachable: `leave` burns shares strictly in proportion to the gamma it releases, so
+  backing cannot be zeroed without zeroing supply.
+- **21 classes** — only class 2 (2 hits, both the `gamma.balanceOf(address(this))` reads)
+  and class 9 (3 hits, ERC20 `transferFrom`). Notably classes 4 and 19 **do not fire**,
+  because the scanner recognises the ERC4626 share shape but not Bancor checkpoints —
+  a scanner gap worth recording, since this is the same vulnerability family.
+
+### Gamma final position
+
+All three in-scope assets examined, none found:
+
+| Asset | Method | Result |
+|---|---|---|
+| xGamma `0x26805021…` | Sourcify exact-match source, 21 classes, algebra | Donation attack impossible for f<1; CEI and overflow closed |
+| Hypervisor `0xa8076ae3…` | 21 classes, live state | No virtual offset — real, but out of scope where live; mature withdraw sound |
+| UniProxy `0x83de646a…` | full read | Sound |
+
+Gamma is now genuinely closed rather than closed-on-a-proxy-check. Worth recording that
+the one real pattern here is worth $0 because of scope, not because of merit — the same
+code on a fresh deployment would be the $50,000 Critical.
