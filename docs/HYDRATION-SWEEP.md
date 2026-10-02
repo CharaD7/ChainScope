@@ -95,18 +95,56 @@ That does not make it nothing. It means:
 - The fix on `master` closes it, so **the reportable target is not the file** — it
   is any *deployed* runtime still predating 2026-07-15.
 
-## What is needed to make this a submission
+## RESOLVED — the live deployment is fixed; finding is dead
 
-1. Identify a live Hydration deployment still running pre-fix code. Hydration
-   ships fast — v49.4.0 (2026-09-28), v53.0.0 (2026-09-22), v49.3.0, v52.0.0 all
-   within the month — so `master` is well ahead of some deployments, but the
-   current Asset Hub runtime almost certainly postdates the fix. An older parachain
-   or a less-upgraded deployment is where this would live.
-2. Establish a desync path with the privileges available to it.
-3. Show the share-math consequence: over-minting on add, over-paying on remove, or
-   a permanently unwithdrawable position.
+Step 1 has been answered, without a parachain RPC at all.
 
-Step 1 is the blocker, and it has now been partly closed.
+**Hydration governance, via Subsquare:** referendum **#413 "Runtime upgrade
+v53.0.0" — Executed.** Also #412 (moving apyUSD/PRIME feeds and four stablepool
+pegs onto CheckedOracles) executed, and #419 "Dwellir — Public RPC Endpoint Service
+Q3 2026" still *deciding* — which explains why no public Hydration endpoint exists:
+the chain is procuring a paid one.
+
+So the live runtime is v53.0.0, published 2026-09-22. Checking the tags directly
+rather than inferring from dates:
+
+| tag | `ensure_issuance_in_sync` | `ensure!(total <= tracked)` |
+|---|---|---|
+| v53.0.0 | present | 1 |
+| v52.0.0 | present | 1 |
+| v49.4.0 | present | 1 |
+| v49.3.0 | present | 1 |
+
+**Every current release contains the production guard.** Combined with #413 being
+executed, the deployed runtime enforces the invariant. **The finding is not
+exploitable against Hydration's live chain and is not a submission.**
+
+Note the method: the deployment question was answered from governance records plus
+tag contents, after the RPC route closed. Two dead ends worth recording, since they
+are the obvious next things to try:
+
+- Alchemy does not serve Substrate chains at all — empty body for
+  `state_getRuntimeVersion` — so rotating those keys cannot help with Hydration.
+- The relay-chain route (`ParachainHost` runtime API → parachain validation
+  function) is sound in principle but not reachable here. Runtime APIs are exported
+  **by hash** (`0x37c8bb1350a9a2a8`, …), so `state_call` needs the 3-param
+  `(api_hash, method, data)` form; `rpc.polkadot.io`'s legacy endpoint only accepts
+  `(method, data)` and rejects it with *"invalid hex character: p"*. Deriving
+  `spec_version` from raw WASM would additionally need a WASM runtime, which is not
+  a Python dependency this project should take on for one question.
+
+Hydration also runs a **parathread**, not a collator, per Subscan — so even the
+validation-function window is shorter than for a normal parachain.
+
+## What would still be needed, if the scope ever changes
+
+Nothing for the live chain. The remaining value in this code is as a *pre-merge*
+observation: a security invariant on the share ledger was enforced only by
+`debug_assert_eq!`, which does not exist in production WASM, and nobody noticed for
+the pallet's lifetime. That pattern — a `debug_assert` standing in for an `ensure`
+on a value-dependent invariant — is worth grepping for across Substrate pallets in
+general, and `cs_substrate.py` now makes the deployment side answerable wherever a
+parachain endpoint exists.
 `core/cs_substrate.py` reads a Substrate chain's runtime identity over ordinary
 HTTP JSON-RPC - `state_getRuntimeVersion` for spec_name/spec_version/apis,
 `state_call("Core_version")` as an independent second route, and
