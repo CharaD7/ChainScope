@@ -370,3 +370,38 @@ def test_class20_still_catches_a_paymaster(tmp_path):
         }
     }
     """, classes=[20])
+
+
+def test_class11_demotes_canonical_aave_identifiers(tmp_path):
+    """`healthFactor` is Aave's variable name, not a risk signal.
+
+    A portfolio sweep read 137 "strong" class-11 hits as fertile; sampling showed
+    interface declarations, local variables, doc comments and GenericLogic. The
+    name is kept in `weak` so it still navigates to the subsystem.
+    """
+    assert _scan(tmp_path, """
+    interface ILendingPool {
+        /// @return healthFactor the current health factor of the user
+        function getUserAccountData(address user)
+            external view returns (uint256 healthFactor);
+    }
+    """, classes=[11]) == {} or all(
+        h["strength"] != "strong" for hs in _scan(tmp_path, """
+    interface ILendingPool {
+        /// @return healthFactor the current health factor of the user
+        function getUserAccountData(address user)
+            external view returns (uint256 healthFactor);
+    }
+    """, classes=[11]).values() for h in hs
+    )
+
+
+def test_class11_still_anchors_on_a_health_factor_definition(tmp_path):
+    """A definition is the place to start reading, so it stays a hit."""
+    assert 11 in _scan(tmp_path, """
+    contract LendingPool {
+        function healthFactor(address user) public view returns (uint256) {
+            return 1e18;
+        }
+    }
+    """, classes=[11])

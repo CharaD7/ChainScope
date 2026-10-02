@@ -169,8 +169,23 @@ CLASSES: list[dict[str, typing.Any]] = [
         "name": "Flawed liquidation math / health factor",
         "why": "Liquidation omits the penalty or lets a liquidator take 100% of collateral for less than the debt -> bad debt, or reserves are drained.",
         "look": "Lending markets, isolated debt pools, synthetic minting.",
-        "strong": [r"healthFactor", r"liquidateBorrow"],
-        "weak": [r"liquidationThreshold", r"closeFactor"],
+        # Reshaped 2026-10-02. `healthFactor` and `liquidateBorrow` are the canonical
+        # Aave/Compound V2/V3 identifiers: a portfolio sweep counted 137 "strong" hits
+        # for this class, and sampling them showed interface declarations, local
+        # variables, doc comments and the heavily-audited GenericLogic library. The
+        # count was vocabulary, not risk.
+        #
+        # A `function healthFactor(` definition is the right place to *start*
+        # reading - it is still a navigation aid - but it is not evidence. Real
+        # liquidation-math bugs (health-factor comparison inverted, missing
+        # MAX_HEALTH_FACTOR sentinel, no zero-collateral guard before dividing,
+        # closeFactor treated as 100%) are semantic and need analysis, not a regex.
+        "strong": [
+            r"function\s+healthFactor\s*\(",
+            r"MAX_HEALTH_FACTOR",
+            r"liquidationThreshold\s*(?:<|>)\s*(?:ltf|ltc|loan)",
+        ],
+        "weak": [r"liquidationThreshold", r"closeFactor", r"healthFactor", r"liquidateBorrow"],
     },
     {
         "id": 12,
