@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from cli.cs_veck import CLASSES, _BY_ID, _strip, scan
+from cli.cs_veck import CLASSES, _BY_ID, _sol_files, _strip, scan
 
 SOL = """// SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.24;
@@ -259,3 +259,56 @@ def test_plain_erc20_does_not_trigger_class19(tmp_path):
     }
     """
     assert _scan(tmp_path, body) == {}
+
+
+# ---------------------------------------------------------------------------
+# _sol_files exclusions
+#
+# Found while running the rare-class sweep: scan() walked vendored dependency
+# trees and test directories, so counts were dominated by other people's code.
+# Royco went from 8031 rare-class hits to 157 once excluded.
+# ---------------------------------------------------------------------------
+
+def test_vendored_directories_excluded_by_default(tmp_path):
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib" / "openzeppelin-contracts").mkdir(parents=True)
+    (tmp_path / "lib" / "openzeppelin-contracts" / "MerkleProof.sol").write_text(
+        "function processProof(bytes32[] calldata proof, bytes32 leaf) "
+        "internal pure returns (bytes32) { return 0; }"
+    )
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "X.sol").write_text("contract X {}")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "A.sol").write_text("contract A {}")
+
+    names = {p.name for p in _sol_files(tmp_path)}
+    assert names == {"A.sol"}
+
+
+def test_test_and_mock_directories_excluded_by_default(tmp_path):
+    (tmp_path / "test").mkdir()
+    (tmp_path / "test" / "T.sol").write_text("contract T {}")
+    (tmp_path / "mocks").mkdir()
+    (tmp_path / "mocks" / "M.sol").write_text("contract M {}")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "A.sol").write_text("contract A {}")
+
+    names = {p.name for p in _sol_files(tmp_path)}
+    assert names == {"A.sol"}
+
+
+def test_exclusions_are_opt_out(tmp_path):
+    (tmp_path / "test").mkdir()
+    (tmp_path / "test" / "T.sol").write_text("contract T {}")
+    assert {p.name for p in _sol_files(tmp_path, include_tests=True)} == {"T.sol"}
+
+
+def test_scan_does_not_match_vendored_copy(tmp_path):
+    """A vendored ERC-4626 must not make a first-party target look dirty."""
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib" / "V.sol").write_text(
+        "contract V { uint256 constant VIRTUAL_SHARES = 1; }"
+    )
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "A.sol").write_text("contract A {}")
+    assert scan(tmp_path, [19]) == []

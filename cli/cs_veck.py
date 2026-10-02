@@ -353,8 +353,44 @@ CLASSES: list[dict[str, typing.Any]] = [
 _BY_ID = {c["id"]: c for c in CLASSES}
 
 
-def _sol_files(root: Path) -> list[Path]:
-    return [p for p in root.rglob("*") if p.suffix in _SOL and p.is_file()]
+# Directories whose contents are not the project's own logic. Scanning them turns
+# hit counts into noise: a vendored `lib/openzeppelin-contracts` alone produced more
+# class-13 hits (MerkleProof mocks) than every first-party contract put together, and
+# a repository's own `test/` tree imports the very helpers the classes look for.
+_VENDOR_DIRS = frozenset({
+    "node_modules", "lib", "libs", "vendor", "vendors", "out", "cache",
+    "artifacts", "artifacts-contracts", "build", "dist", "coverage",
+    ".git", ".forge", "broadcast", "typechain", "typechain-types",
+    "external", "externals", "deps", "dependencies",
+})
+_TEST_DIRS = frozenset({
+    "test", "tests", "mocks", "mock", "__mocks__", "mocks_contracts",
+    "test_contracts", "testnet", "fixtures", "test-fixtures",
+})
+
+
+def _sol_files(
+    root: Path, *, include_tests: bool = False, include_vendor: bool = False
+) -> list[Path]:
+    """Collect first-party Solidity sources under `root`.
+
+    By default, vendored dependency trees and test/mock directories are excluded.
+    Both are excluded because they are not the code under audit and they dominate
+    hit counts: scanning them can bury a real finding under thousands of hits from
+    OpenZeppelin's own mocks, and it can equally make a target look clean because
+    the match landed in a vendored copy rather than in first-party code.
+    """
+    out: list[Path] = []
+    for p in root.rglob("*"):
+        if p.suffix not in _SOL or not p.is_file():
+            continue
+        parts = set(p.relative_to(root).parts[:-1]) if p != root else set()
+        if not include_vendor and parts & _VENDOR_DIRS:
+            continue
+        if not include_tests and parts & _TEST_DIRS:
+            continue
+        out.append(p)
+    return out
 
 
 def _strip(line: str) -> str:
@@ -423,7 +459,13 @@ def _pattern_is_handled(lines: list[str], idx: int) -> bool:
     return any(pat.search(lines[j]) for j in range(idx + 1, min(idx + 1 + window, len(lines))))
 
 
-def scan(root: Path, class_ids: list[int] | None = None) -> list[dict[str, typing.Any]]:
+def scan(
+    root: Path,
+    class_ids: list[int] | None = None,
+    *,
+    include_tests: bool = False,
+    include_vendor: bool = False,
+) -> list[dict[str, typing.Any]]:
     """Return ranked hits: {class_id, class, strength, file, line, snippet}.
 
     Two matching passes per file:
@@ -436,7 +478,7 @@ def scan(root: Path, class_ids: list[int] | None = None) -> list[dict[str, typin
     """
     hits: list[dict[str, typing.Any]] = []
     wanted = class_ids or [c["id"] for c in CLASSES]
-    for f in _sol_files(root):
+    for f in _sol_files(root, include_tests=include_tests, include_vendor=include_vendor):
         try:
             lines = f.read_text(errors="replace").splitlines()
         except OSError:
