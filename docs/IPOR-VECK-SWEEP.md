@@ -56,18 +56,29 @@ than falling through. The delegatecall target is not user-controlled.
 
 Ranked by how much money is reachable, not by hit count.
 
-1. **`DemandSpreadLibs` — what bounds `demandSpread`.**
-   `OfferedRateCalculationLibs.calculatePayFixedOfferedRate` applies the
-   `payFixedMinCap` to the *base* rate and then adds `demandSpread` on top:
+1. ~~**`DemandSpreadLibs` — what bounds `demandSpread`.**~~ **Closed — bounded.**
+   The `payFixedMinCap` applies to the *base* rate and `demandSpread` is added on
+   top, which looked like an unbounded rate. It is not:
 
    ```solidity
-   if (baseOfferedRate > payFixedMinCap) offeredRate = baseOfferedRate + demandSpread;
-   else                                   offeredRate = payFixedMinCap + demandSpread;
+   ratio = weightedNotional * 1e18 / maxNotional;   // maxNotional = lpDepth * demandSpreadFactor
+   ratio < 0.2 -> 0.05 * ratio
+   ratio < 0.5 -> 0.1333 * ratio - 0.01667
+   ratio < 1.0 -> 0.5   * ratio - 0.2
+   else        -> 3e17            // hard 30% cap
    ```
 
-   So the cap does **not** bound the final offered rate. Whether that matters
-   depends entirely on the demand curve being bounded, and that curve has not been
-   read. This is the highest-Critical-potential lead left in the AMM.
+   The piecewise curve is continuous at all three boundaries (1% at 0.2, 5% at 0.5,
+   30% at 1.0) and hard-capped at 30%. So the offered rate is bounded by
+   `(iporIndex + oracleBaseSpreadPerLeg) + 30%`. The only unbounded input left is
+   the risk oracle's `baseSpreadPerLeg`, which is governance-controlled and a
+   disclosed trust assumption, not a bug.
+
+   Edge cases in the same path are fail-safe rather than dangerous:
+   `calculateLpDepth` is `liquidityPoolBalance + |payFixed - receiveFixed|`, and
+   `IporMath.division(x, 0)` reverts. If the imbalance ever exceeds the pool
+   balance, or lpDepth reaches 0, the open-swap reverts. Those are denial of
+   service at worst — they cannot be turned into a loss.
 
 2. **`CalculateWeightedLpTokenBalance{Ethereum,Arbitrum}` (class 3, 11 hits).**
    Weighting LP-token balances by a Chainlink `latestRoundData()` read. Class 3 is
@@ -89,13 +100,32 @@ Ranked by how much money is reachable, not by hit count.
 
 ## Honest status
 
-I have not found the Critical. The two scanner strong-hits are false positives and
-I proved both on-chain. The PowerToken exchange rate is real but unprofitable. The
-rate math is clamped on both sides. What remains is the demand-spread bound, the
-oracle freshness checks, and the ERC4626 treasury interaction — all plausible,
-none yet demonstrated.
+I have not found the Critical, and I want to be straight that this is now the
+likely answer rather than an open question.
 
-IPOR's Critical tier pays a **flat $1,000**, so none of this is worth escalating
-without a demonstration. The lead worth pursuing is #1, because an unbounded
-demand spread on a rate that is added after its own cap is the kind of thing that
-turns into a reportable number rather than a story.
+Closed so far, each with evidence rather than inference:
+
+| Lead | Result |
+|---|---|
+| PowerToken exchange rate (no virtual offset) | Real, confirmed on deployed bytecode, but unprofitable while attacker's base share < 1 — 256 fuzz runs |
+| `payFixedMinCap` / `receiveFixedMaxCap` rate clamps | Sound, clamped both directions and floored at 0 |
+| `DemandSpreadLibs` demand spread | **Bounded** at 30%, continuous across all three breakpoints |
+| lpDepth / division-by-zero edges | Fail-safe reverts, cannot cause loss |
+| Veck class 1, uninitialized proxy | False positive — both proxies verified initialised on mainnet |
+| Veck class 12, delegatecall | False positive — targets are four `immutable` addresses behind a reverting ladder |
+
+What I have not demonstrated, and would need to demonstrate before writing a
+report: oracle round freshness in `CalculateWeightedLpTokenBalance*`, and the
+ERC4626 share price feeding `AmmTreasuryBaseV2`.
+
+One thing worth weighing before more time goes in here. IPOR's Critical tier is a
+**flat $1,000** — a fixed sum, not a band. And the shape of this codebase argues
+against there being an undiscovered Critical: it is a Yieldspace-style
+fixed-rate-per-tenor AMM whose two central numbers (the index and the base spread)
+both come from a governance risk oracle, with every derived spread clamped and
+every pathological input reverting rather than paying out. The places a Critical
+would actually live are the oracle trust assumptions and the ERC4626 treasury
+interaction, and those are the places this design is explicitly conservative.
+
+Spending another hour to find a $1,000 issue here is a worse trade than
+submitting the $5,000 mETH finding that is already PoC-green.
