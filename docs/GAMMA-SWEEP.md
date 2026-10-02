@@ -122,3 +122,76 @@ not reportable without resolving whether newly-deployed Hypervisors are in scope
 What this pass actually changes is the triage verdict, not the finding. Gamma is live,
 carries a **$50,000** ceiling, and was closed on a proxy check that never examined the
 share math. It should be re-opened as an active target.
+---
+
+## Follow-up: scope resolved, and the mature vault tested
+
+### Scope — this kills the donation finding
+
+From the programme page:
+
+- **Total Assets in Scope: 3** — only the listed addresses. A newly-deployed
+  Hypervisor is **not** in scope, which was the only condition under which the
+  first-depositor attack is live.
+- Critical **flat $50,000**, Medium flat $5,000, `primacy_of_rules`, PoC required,
+  `pausedAt: null`, `endDate: null`.
+- Two declared **out of scope**: UniProxy configurations other than the shipped one,
+  and xGamma's deposit-before/withdraw-after-rebase window.
+- Prohibited: testing on mainnet; all testing on **local forks**.
+
+So the donation pattern is real code but **not reportable** — out of scope where it
+would work, and `f < 1` where it is in scope.
+
+### Mature vault — totalSupply and withdraw tested, sound
+
+`_liquidityForShares` (`Hypervisor.sol:446`):
+
+```solidity
+return _uint128Safe(uint256(position).mul(shares).div(totalSupply()));
+```
+
+`withdraw` (`:217`) does the following, and every rounding favours the vault:
+
+| Step | Line | Direction |
+|---|---|---|
+| shares → liquidity, base | 233 | down |
+| shares → liquidity, limit | 242 | down |
+| idle token0 pro-rata | 250 | down |
+| idle token1 pro-rata | 251 | down |
+| `_burnLiquidity` owed vs `amount0Min` | 430 | `require` floors the user |
+
+`totalSupply()` is read consistently **before** `_burn` (`:259`), so the pro-rata
+division is against the pre-burn supply — correct. `_burnLiquidity` enforces
+`owed >= amount0Min` with `require`, so slippage cannot be under-reported.
+
+One minor imprecision, not worth reporting: the supply cap at `:163` tests
+`total` (pre-mint) rather than `total + shares`, so `maxTotalSupply` can be exceeded
+by one deposit's worth. On the deployed vault `maxTotalSupply` is 0, i.e. disabled,
+and `clearShares` re-checks post-mint in `UniProxy.deposit:63`.
+
+### UniProxy (`0x83de646a…`, in scope, previously unexamined)
+
+Read in full. No initializer, so class 1 does not apply — it is called directly by
+users, not behind a proxy. `deposit` is `nonReentrant`, calls `clearDeposit` then
+`Hypervisor.deposit` then `clearShares` (`:59-63`), and `onlyOwner` guards
+`transferClearance` / `transferOwnership`.
+
+`Hypervisor.withdraw` is **not** whitelisted-gated and carries only
+`require(from == msg.sender, "own")` (`:258`), so anyone may withdraw their own
+shares without passing through UniProxy or ClearingV2. That skips the registry check,
+but not value: the caller supplies their own `minAmounts` and `_burnLiquidity`
+enforces it. Not a finding — arguably intended, since proxied deposit with direct
+withdraw still lets a delisted position be exited.
+
+### Net position on Gamma
+
+In scope there are three addresses. Two (Hypervisor, UniProxy) have now been read in
+full against all 21 classes with the deployed state verified live; xGamma is in scope
+but its source is **not** in this repository, so it remains unexamined.
+
+Nothing found. The one genuinely interesting pattern — no virtual offset in
+`getTotalAmounts()` — is real, correctly classified by the 21-class sweep, and
+**out of scope where it would be exploitable**.
+
+Gamma should not be closed, though: it carries a $50,000 ceiling, and xGamma is an
+in-scope contract that has never been looked at in this session.
