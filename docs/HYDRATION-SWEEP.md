@@ -106,8 +106,30 @@ That does not make it nothing. It means:
 3. Show the share-math consequence: over-minting on add, over-paying on remove, or
    a permanently unwithdrawable position.
 
-Step 1 is the blocker and it needs a Polkadot runtime read, which this session's
-toolchain cannot do over plain HTTP JSON-RPC.
+Step 1 is the blocker, and it has now been partly closed.
+`core/cs_substrate.py` reads a Substrate chain's runtime identity over ordinary
+HTTP JSON-RPC - `state_getRuntimeVersion` for spec_name/spec_version/apis,
+`state_call("Core_version")` as an independent second route, and
+`state_getStorage(":code")` for the WASM blob so it can be hashed. The two routes
+are cross-checked against each other and disagreement is reported rather than
+silently resolved, because a lagging archive node will happily serve an old
+version from a state query while `Core_version` executes against the real runtime.
+
+Verified working against the Polkadot relay chain: `polkadot` / `parity-polkadot`,
+specVersion 2005000, both routes agreeing, confirmed on two independent endpoints.
+14 offline tests.
+
+**Hydration itself remains unread.** Alchemy does not serve Substrate chains at all
+- it returns an empty body for `state_getRuntimeVersion` - so the rotated keys do
+not help here. No Hydration parachain endpoint resolved from this environment:
+`rpc.hydration.cloud` does not resolve, and the dwellir/onfinality/publicnode
+candidates either fail or only serve the relay chain. One public node also
+withholds `:code` at `latest` while serving historical blocks, which is why
+`describe_runtime` reports `code_available: False` and omits `code_hash` rather
+than fabricating one.
+
+So the tooling gap is closed; the data gap is not. Hydration needs a reachable
+parachain RPC endpoint.
 
 ## Verdict
 
