@@ -33,3 +33,6 @@ tools/**/__pycache__/
 tools/diamond_fixture/lib/
 tools/diamond_fixture/out/
 tools/diamond_fixture/cache/
+
+# generated RE surface dumps
+*_surface/
