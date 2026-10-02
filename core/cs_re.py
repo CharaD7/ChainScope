@@ -291,6 +291,75 @@ def extract_selectors(code_hex: str, dispatcher_fraction: float = 0.5) -> dict[s
     }
 
 
+def classify_reachable(
+    address: str,
+    signature: str,
+    rpc_call: t.Callable[[str, str], str],
+    *,
+    control_signature: str | None = None,
+) -> str:
+    """Classify one function's reachability by *differential* revert comparison.
+
+    Revert data alone is not a reachability signal. An absent selector on a contract
+    with no fallback reverts with ``0x``; a present function that hits a ``require``
+    reverts with ``Error(string)``; but a contract with a **custom-error fallback**
+    answers *every* unknown selector with its own error, which looks exactly like a
+    function that was found and rejected.
+
+    Verified on IPOR/mETH: an unknown selector on the deployed Staking contract
+    reverted ``0x34352c73``, identical to what ``approve(address,uint256)``
+    returned. Reading that naively as "approve exists" inverts the finding's
+    severity-limiting claim; the truth is the reverse, Staking exposes no ERC-20
+    allowance at all.
+
+    So the test is differential: probe a selector that cannot exist, then compare.
+    Identical revert data means "absent"; different data means "present".
+
+    .. warning::
+       ``present`` is trustworthy with selector-only probing. ``absent`` is **not**,
+       for any function that takes arguments. Probing sends the 4-byte selector
+       with no argument words, so the dispatcher matches the function and then
+       fails while decoding calldata - often with the same empty revert as an
+       unknown selector. Observed live: ``mETH.allowance(address,address)`` probes
+       as ``absent`` here yet answers ``0`` when given real arguments.
+
+       To get a trustworthy ``absent``, pass full pre-encoded calldata via
+       ``signature`` (any string containing ``0x`` is treated as data, not a
+       signature), e.g. selector + 64 zero bytes per argument.
+
+    Returns ``"present"``, ``"absent"``, ``"present-ok"`` (call succeeded),
+    ``"ambiguous"`` (control unavailable or identical behaviour with no fallback
+    distinction available), or ``"error"``.
+    """
+
+    def _revert(sig: str) -> tuple[str, str | None]:
+        try:
+            data = _selector(sig) if "0x" not in sig else sig
+        except Exception:
+            return "error", None
+        try:
+            res = rpc_call(address, data)
+            return "present-ok", (res or "0x")
+        except Exception as e:
+            return "revert", str(e)
+
+    ctrl_kind, ctrl_detail = _revert(control_signature or "___thisCannotExist___()")
+
+    kind, detail = _revert(signature)
+    if kind == "present-ok":
+        return "present-ok"
+    if kind == "error":
+        return "error"
+    if ctrl_kind == "error":
+        return "ambiguous"
+    if ctrl_kind == "present-ok":
+        # control answered, so it does exist - bad control, cannot discriminate
+        return "ambiguous"
+    if detail == ctrl_detail:
+        return "absent"
+    return "present"
+
+
 def probe_selectors(
     address: str,
     signatures: list[str],
@@ -300,12 +369,14 @@ def probe_selectors(
 
     Unlike :func:`extract_selectors`, this does not look at code at all: it sends a
     real ``eth_call`` for each signature and records whether the node accepted it.
-    A revert means "no such reachable function", which for an optimised dispatcher
-    is the only reliable answer.
 
-    ``rpc_call(to, data) -> result_hex`` must raise or return a falsy/``0x`` value
-    on revert. Argument encoding is the caller's job, so pass signatures whose
-    arguments are all zero-valued or absent - enough to exercise the dispatcher.
+    .. warning::
+       A revert is **not** proof of absence - see :func:`classify_reachable` for the
+       differential form, which is what you want when the target may have a
+       fallback. This convenience wrapper only answers "did it respond", which is
+       still the right question for a contract with no fallback.
+
+    ``rpc_call(to, data) -> result_hex`` must raise on revert.
 
     Returns ``{signature: responded}``.
     """

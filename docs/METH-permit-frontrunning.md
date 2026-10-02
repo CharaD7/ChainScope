@@ -74,6 +74,39 @@ Note: this is trivially the piece most likely to be wrong, because `approve` liv
 the **mETH token**, not on Staking, and Staking itself is a proxy - checking the
 right contract matters.
 
+### Re-verification — 2026-10-02, behavioural rather than selector-scan
+
+The table above was originally established by checking whether each selector appears
+as a literal in the deployed bytecode. That method was later found to be unsound:
+`extract_selectors` reads `PUSH4` immediates, and modern solc dispatches via a binary
+search over range comparisons, so those immediates are bounds rather than selectors.
+Re-verified behaviourally via `eth_call`, classifying each function by **differential
+revert comparison** against an impossible selector:
+
+| Contract | Function | Result |
+|---|---|---|
+| Staking impl `0x01a36039…` | `unstakeRequestWithPermit(uint128,uint128,uint256,uint8,bytes32,bytes32)` | **present** |
+| Staking proxy `0xe3cBd06D…` | same | **present** |
+| Staking impl `0x01a36039…` | `unstakeRequest(uint128,uint128)` | **present** |
+| Staking impl `0x01a36039…` | `approve(address,uint256)` | **absent** |
+| Staking impl `0x01a36039…` | `allowance(address,address)` | **absent** |
+| mETH `0x052f5274…` | `approve(address,uint256)` | reachable when given real arguments |
+
+The EIP-1967 implementation slot on the proxy was re-read and still resolves to
+`0x01a360392c74b5b8bf4973f438ff3983507a06a2`, matching the implementation this
+finding was written against.
+
+**Both load-bearing claims survive.** `unstakeRequestWithPermit` is reachable on the
+deployed contract, and Staking exposes no ERC-20 allowance — which is what separates
+this finding from Critical. Without Staking, a front-runner's `permit` would hand the
+victim's signature to a spender that could use it; with no allowance anywhere in
+Staking, the signature is simply spent and the request is lost.
+
+One methodological note worth keeping: Staking answers *every* unknown selector with
+a custom error (`0x34352c73`). Read naively, `approve` reverting looked identical to
+"function present, logic rejected", which would have inverted the severity limiter.
+Only the differential comparison shows it is genuinely absent.
+
 ---
 
 ## Root cause

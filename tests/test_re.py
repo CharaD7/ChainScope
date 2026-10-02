@@ -24,6 +24,7 @@ from core.cs_re import (
     diff_bytecode,
     extract_selectors,
     probe_selectors,
+    classify_reachable,
     infer_interfaces,
     is_minimal_proxy,
     iter_opcodes,
@@ -164,6 +165,112 @@ class TestSelectorProbing:
         )
         assert seen["data"] == want
         assert got["totalSupply()"] is True
+
+
+class TestReachableClassification:
+    """Revert data alone is not a reachability signal."""
+
+    def _rpc(self, table):
+        def rpc_call(to, data):
+            if data in table:
+                action = table[data]
+                if isinstance(action, Exception):
+                    raise action
+                return action
+            raise RuntimeError("execution reverted: 0x")
+
+        return rpc_call
+
+    @staticmethod
+    def _sel(signature):
+        import subprocess
+
+        return subprocess.run(
+            ["cast", "sig", signature], capture_output=True, text=True
+        ).stdout.strip()
+
+    def test_custom_error_fallback_does_not_fake_presence(self):
+        """A fallback answering every unknown selector must read as absent.
+
+        This is the mETH Staking case: an unknown selector and approve() both
+        reverted 0x34352c73. Naive revert-reading says approve exists, which
+        inverts the severity-limiting claim.
+        """
+        fallback = RuntimeError("execution reverted: 0x34352c73")
+        rpc = self._rpc(
+            {
+                self._sel("approve(address,uint256)"): fallback,
+                self._sel("___nope___()"): fallback,
+            }
+        )
+        got = classify_reachable(
+            "0x0000000000000000000000000000000000000001",
+            "approve(address,uint256)",
+            rpc,
+            control_signature="___nope___()",
+        )
+        assert got == "absent"
+
+    def test_distinct_revert_data_reads_as_present(self):
+        rpc = self._rpc(
+            {
+                self._sel("approve(address,uint256)"): RuntimeError(
+                    "execution reverted: 0x08c379a0: nope"
+                ),
+                self._sel("___nope___()"): RuntimeError("execution reverted: 0x"),
+            }
+        )
+        got = classify_reachable(
+            "0x0000000000000000000000000000000000000001",
+            "approve(address,uint256)",
+            rpc,
+            control_signature="___nope___()",
+        )
+        assert got == "present"
+
+    def test_success_is_reported_as_present_ok(self):
+        rpc = self._rpc({self._sel("approve(address,uint256)"): "0x" + "01" * 32})
+        got = classify_reachable(
+            "0x0000000000000000000000000000000000000001",
+            "approve(address,uint256)",
+            rpc,
+            control_signature="___nope___()",
+        )
+        assert got == "present-ok"
+
+    def test_pre_encoded_calldata_is_passed_through(self):
+        """A 0x-prefixed value is calldata, so args can be supplied for a real absent."""
+        approve = self._sel("approve(address,uint256)")
+        data = approve + "00" * 64
+        seen = {}
+
+        def rpc_call(to, d):
+            seen["data"] = d
+            # candidate falls through to the custom-error fallback; the unknown
+            # selector reverts empty, so the two differ and the callee is present
+            if d == data:
+                raise RuntimeError("execution reverted: 0x34352c73")
+            raise RuntimeError("execution reverted: 0x")
+
+        got = classify_reachable(
+            "0x0000000000000000000000000000000000000001",
+            data,
+            rpc_call,
+            control_signature="___nope___()",
+        )
+        assert seen["data"] == data
+        assert got == "present"
+
+    def test_empty_reverts_with_empty_control_are_ambiguous_without_fallback(self):
+        """No fallback anywhere: revert data cannot discriminate, so say so."""
+        rpc = self._rpc({})
+        got = classify_reachable(
+            "0x0000000000000000000000000000000000000001",
+            "approve(address,uint256)",
+            rpc,
+            control_signature="___nope___()",
+        )
+        assert got in ("absent", "ambiguous")
 
 
 class TestMinimalProxy:
