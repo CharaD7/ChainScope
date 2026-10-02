@@ -171,10 +171,19 @@ def test_plain_contract_does_not_trigger_aa_classes(tmp_path):
 # must fire; a contract with the shape absent must not.
 # ---------------------------------------------------------------------------
 
-def _scan(tmp_path: Path, body: str, name: str = "T.sol") -> dict[int, list]:
+def _scan(
+    tmp_path: Path, body: str, name: str = "T.sol", classes: list[int] | None = None
+) -> dict[int, list]:
+    """Scan `body` and group hits by class id.
+
+    `classes` defaults to [19] for the class-19 suite. It must be overridable:
+    a helper hardcoded to one class makes every "no hits" assertion for another
+    class pass vacuously, which is exactly the failure the third class-20 test
+    caught.
+    """
     p = tmp_path / name
     p.write_text(body)
-    hits = scan(tmp_path, [19])
+    hits = scan(tmp_path, classes if classes is not None else [19])
     out: dict[int, list] = {}
     for h in hits:
         out.setdefault(h["class_id"], []).append(h)
@@ -312,3 +321,52 @@ def test_scan_does_not_match_vendored_copy(tmp_path):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "A.sol").write_text("contract A {}")
     assert scan(tmp_path, [19]) == []
+
+
+# ---------------------------------------------------------------------------
+# Class 20 must not match a bare contract name or an unrelated local variable.
+#
+# A portfolio sweep reported class 20 as 273 strong / 289 total - a 94% strong
+# ratio, which reads as extremely fertile. All of it was two bad patterns:
+# a bare `EntryPoint` matching Royco's own `RoycoEntryPoint` contract, and
+# `postOp\b` matching a local variable in RoycoDayAccountant.
+# ---------------------------------------------------------------------------
+
+def test_class20_ignores_own_entrypoint_contract_name(tmp_path):
+    _scan(tmp_path, """
+    import { IRoycoEntryPoint } from "../interfaces/IRoycoEntryPoint.sol";
+    contract RoycoEntryPoint is RoycoBase, IRoycoEntryPoint {
+        struct RoycoEntryPointState { uint256 x; }
+    }
+    """, "RoycoEntryPoint.sol", classes=[20])
+    assert _scan(tmp_path, """
+    import { IRoycoEntryPoint } from "../interfaces/IRoycoEntryPoint.sol";
+    contract RoycoEntryPoint is RoycoBase, IRoycoEntryPoint {
+        struct RoycoEntryPointState { uint256 x; }
+    }
+    """, "RoycoEntryPoint.sol", classes=[20]) == {}
+
+
+def test_class20_ignores_postop_as_a_local_variable(tmp_path):
+    assert _scan(tmp_path, """
+    contract RoycoDayAccountant {
+        function sync() external {
+            SyncedAccountingState memory postOp = kernel.syncTrancheAccountingFromAccountant();
+            require(postOp.liquidityUtilizationWAD <= WAD);
+        }
+    }
+    """, classes=[20]) == {}
+
+
+def test_class20_still_catches_a_paymaster(tmp_path):
+    assert 20 in _scan(tmp_path, """
+    contract GaslessPaymaster {
+        function validatePaymasterUserOp(
+            UserOperation calldata userOp,
+            bytes32 userOpHash,
+            uint128 maxCost
+        ) external returns (bytes memory context, uint256 validationData) {
+            return (abi.encode(userOpHash), 0);
+        }
+    }
+    """, classes=[20])

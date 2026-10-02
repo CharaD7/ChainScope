@@ -318,10 +318,17 @@ CLASSES: list[dict[str, typing.Any]] = [
         "strong": [
             r"validatePaymasterUserOp",
             r"_validatePaymasterUserOp",
-            r"postOp\b",
+            # Anchored, not bare names. `postOp\b` matched a local variable named
+            # postOp in RoycoDayAccountant, and a bare `EntryPoint` matched
+            # Royco's own `RoycoEntryPoint` contract - neither is an ERC-4337
+            # paymaster. The 4337 `postOp` is a hook; require the shape.
+            r"function\s+postOp\b|postOp\s*\(",
             r"paymasterAndData",
             r"preVerificationGas",
-            r"EntryPoint",
+            # EntryPoint only counts when used as the 4337 singleton, i.e. a call
+            # site on it - not when it is merely named in a declaration.
+            r"EntryPoint\s*\.\s*(?:depositTo|withdrawTo|balanceOf|addStake|"
+            r"unlockStake|handleOps|getUserOpHash|getNonce)",
         ],
         "weak": [
             r"BasePaymaster|IPaymaster",
