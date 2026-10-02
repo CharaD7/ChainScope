@@ -39,6 +39,8 @@ import re
 import typing as t
 from pathlib import Path
 
+from cli.cs_move_parse import parse_module
+
 MOVE = {".move"}
 
 _SKIP_DIRS = frozenset({
@@ -119,7 +121,17 @@ def _split_top(arg: str) -> list[str]:
 
 
 def scan_dynamic_field_key(root: Path) -> list[dict[str, t.Any]]:
-    """M1: a public function writing a dynamic field under a caller-supplied key."""
+    """M1: a public function writing a dynamic field under a caller-supplied key.
+
+    Structural, not textual. Uses the parser so that:
+      * the body is exactly this function's (the regex version credited a
+        `dynamic_field::add` to the preceding function),
+      * the key argument is read as an argument, so a struct literal like
+        `Key { tag: 7 }` is not mistaken for a caller-supplied key,
+      * a parent constructed in the same body is recognised, because the real
+        `Versioned::create` in the Sui framework has a caller key and a fresh
+        parent and is not a collision.
+    """
     hits: list[dict[str, t.Any]] = []
     for f in move_files(root):
         try:
@@ -128,61 +140,41 @@ def scan_dynamic_field_key(root: Path) -> list[dict[str, t.Any]]:
             continue
         if "dynamic_field" not in text:
             continue
-        for name, params, body, line_no in _fun_bodies(text):
-            if not _WRITE_OPS.search(body):
-                continue
-            # The dynamic_field call must be in THIS function's body, and the key
-            # must be a *bare identifier* that came from a parameter. A struct
-            # literal such as `Key { tag: 7 }` is an internally derived key and
-            # must not match - a loose "does any key-ish word appear" test
-            # flagged it purely because the struct had a `tag` field.
-            mcall = re.search(
-                r"dynamic_field::(?:add|borrow_mut)\s*\([^;]*", body, re.I
-            )
-            if not mcall:
-                continue
-            arg = mcall.group(0)
-            parts = [a.strip() for a in _split_top(arg[arg.index("(") + 1 :])]
-            second = parts[1] if len(parts) > 1 else ""
-            bare_ident = bool(re.fullmatch(r"[A-Za-z_]\w*", second))
-            param_names = set(re.findall(r"([A-Za-z_]\w*)\s*:", params))
-            keyed = bare_ident and (
-                second in param_names
-                or bool(re.fullmatch(_KEY_NAMES, second, re.I))
-            )
-            if not keyed:
-                continue
-            # If the parent is constructed in this body the object is brand new and
-            # there is nothing for the key to collide with. This is what
-            # `Versioned::create` in the Sui framework looks like:
-            #
-            #     let mut self = Versioned { id: object::new(ctx), version: init_version };
-            #     dynamic_field::add(&mut self.id, init_version, init_value);
-            #
-            # Caller-supplied key, but a fresh parent every call, so a collision
-            # cannot occur. Without this carve-out the framework's own code is the
-            # scanner's only hit.
-            if re.search(r"object::new\s*\(|dynamic_object_field::new", body):
-                continue
-            if re.search(r"let\s+mut\s+\w+\s*=\s*\w+\s*\{", body):
-                continue
-            guarded = bool(
-                re.search(
-                    r"(assert!|assert_occupied|contains_|has_key|is_valid|verify|derive|compute)\b[^;]*"
-                    rf"{_KEY_NAMES}",
-                    body,
-                    re.I,
+        for fn in parse_module(text):
+            body = fn.body
+            for call in re.finditer(
+                r"dynamic_field::(add|borrow_mut)\s*\(([^;]*?)\)\s*;", body, re.S
+            ):
+                args = [a.strip() for a in _split_top(call.group(2))]
+                if len(args) < 2:
+                    continue
+                key = args[1]
+                # the key must be a bare identifier, not an expression
+                if not re.fullmatch(r"[A-Za-z_]\w*", key):
+                    continue
+                param_names = {p.name for p in fn.params}
+                if key not in param_names:
+                    continue  # internally derived
+                # a parent created in this body cannot be collided with
+                if re.search(r"object::new\s*\(|dynamic_object_field::new", body):
+                    continue
+                if re.search(r"let\s+mut\s+\w+\s*=\s*\w+\s*\{", body):
+                    continue
+                guarded = bool(
+                    re.search(
+                        r"(assert!|assert_occupied|contains_|has_key|is_valid|verify|derive)\b",
+                        body,
+                    )
                 )
-            )
-            hits.append({
-                "class_id": "M1",
-                "class": "public function writes a dynamic field under a caller-supplied key",
-                "fn": name,
-                "file": str(f),
-                "line": line_no,
-                "snippet": " ".join(body.split())[:200],
-                "severity_hint": "low" if guarded else "high",
-            })
+                hits.append({
+                    "class_id": "M1",
+                    "class": "function writes a dynamic field under a caller-supplied key",
+                    "fn": fn.name,
+                    "file": str(f),
+                    "line": fn.line,
+                    "snippet": " ".join(body.split())[:200],
+                    "severity_hint": "low" if guarded else "high",
+                })
     return hits
 
 
@@ -231,25 +223,21 @@ def scan_upgrade_authority(root: Path) -> list[dict[str, t.Any]]:
         # `init` is precisely where a TreasuryCap is created and handed to the
         # deployer. Restricting this to `public`/`entry` made M3 return zero on
         # bluefin_coin::blue, whose only capability movement is inside `init`.
-        for m in re.finditer(
-            r"(?m)^\s*(?:public(?:\s*entry)?|entry)?\s*fun\s+(\w+)\s*(\([^)]*\))", text
-        ):
-            name, params = m.group(1), m.group(2)
-            start = m.end()
-            nxt = re.search(r"(?m)^\s*(?:public\s+)?(?:entry\s+)?fun\s+", text[start:])
-            body = text[start : start + (nxt.start() if nxt else 3000)]
-            # The capability may be named in the signature, or - as in
-            # bluefin_coin::blue's `init(witness: BLUE, ctx: &mut TxContext)` -
-            # created inside the body and handed to the sender. Requiring it in
-            # the signature alone missed exactly that case.
+        for fn in parse_module(text):
+            body = fn.body
+            # The capability can be named in the parameter types (the common
+            # case: `cap: UpgradeCap`) rather than in the body, so all three
+            # places it can appear are checked.
             if not (
-                re.search(r"(?i)cap", name + params)
-                or _CAP_DECL.search(body)
+                _CAP_DECL.search(body)
                 or _CAP_OPS.search(body)
+                or fn.has_param_type("Cap")
+                or "cap" in fn.name.lower()
             ):
                 continue
-            if not _CAP_STORE.search(body) and not re.search(
-                r"(?i)\btransfer\b|public_transfer", body
+            if not (
+                _CAP_STORE.search(body)
+                or re.search(r"(?i)\btransfer\b|public_transfer", body)
             ):
                 continue
             if _FREEZE.search(body):
@@ -257,9 +245,9 @@ def scan_upgrade_authority(root: Path) -> list[dict[str, t.Any]]:
             hits.append({
                 "class_id": "M3",
                 "class": "capability (UpgradeCap/TreasuryCap) transferred or returned without freeze",
-                "fn": name,
+                "fn": fn.name,
                 "file": str(f),
-                "line": text[: m.start()].count("\n") + 1,
+                "line": fn.line,
                 "snippet": " ".join(body.split())[:200],
                 "severity_hint": "high",
             })
