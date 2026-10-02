@@ -220,3 +220,67 @@ and the failure always looks like a protocol finding until you read it.
 so the earlier caveat that `maximize` was "a reading, not a result" is resolved for that
 branch. What remains unexecuted is the per-market loop beneath it, which needs a market,
 a pool value and market token balances deployed.
+
+---
+
+## Addendum 3 — the market loop, executed
+
+The first three campaigns tested arithmetic in isolation. This one deploys the real
+pieces and drives `_getMarketTokenAmount` end to end: `RoleStore`, `DataStore`, a market
+that is also its own market token, the real `GlvToken` (a `StrictBank`), and pool amounts
+seeded through DataStore exactly as `MarketUtils.getPoolAmount` reads them
+(`Keys.poolAmountKey`). No Uniswap pool, because `getPoolValueInfo` reads virtual
+reserves from DataStore rather than calling the pool.
+
+The GLV is deliberately left **unpriced** (`primaryPrices` returns `(0,0)`), so
+`getGlvValue` cannot short-circuit and the per-market loop actually executes — that loop
+was the entire point.
+
+**5 tests, 20,000 runs, all green.**
+
+| Test | Property |
+|---|---|
+| `testFuzz_amountIsProportionalToGlvBalance` | linear in the GLV amount, monotonic, bounded |
+| `testFuzz_exitValuation_neverExceedsDepositValuation` | **the guard, now at market level**, with the oracle spread varied to 100% |
+| `testFuzz_neverExceedsGlvMarketTokenBalance` | exit ≤ the GLV's whole balance |
+| `test_zeroGlvBalance_returnsZero` | zero balance contributes zero |
+| `test_zeroPoolValue_reverts_ratherThanWrapping` | degenerate state reverts, never wraps |
+
+### Observation recorded, not claimed
+
+A **zero** pool value does not produce `Errors.GlvNegativeMarketPoolValue` — that guard
+is `poolValue < 0`, and zero is not negative. Control instead falls through to
+`usdToMarketTokenAmount(0, 0, supply)`, which skips both seed branches (they require
+`supply == 0` or `poolValue > 0`) and reverts with **panic 0x12, division by zero**.
+
+So the exit reverts rather than wrapping, which is safe. But it burns the full gas
+allowance instead of failing with a clean custom error, and it is reachable whenever a
+GLV's underlying market has already been emptied to zero. That is a gas/error-hygiene
+observation on a degenerate path, not a fund-loss path, and it needs an emptied market to
+reach. **Not filed.**
+
+### Harness notes for reuse
+
+- `GlvToken` is `onlyController` for `mint`, so the test contract needs
+  `Role.CONTROLLER` before seeding.
+- `glvTokenAmountToUsd` reverts `EmptyGlvTokenSupply` at zero GLV supply — so a
+  "full withdrawal returns the full balance" identity is only true when the GLV holds the
+  entire market-token supply. My first version asserted identity and failed on the first
+  input; the contract was right. The correct invariant is linearity plus bounds.
+- Funding goes through the real `StrictBank` path: ERC20 transfer to the GLV, then
+  `recordTransferIn` as CONTROLLER. That sets `tokenBalances` the same way production does.
+
+### Cumulative GMX — 110,000 runs
+
+| area | runs | executed |
+|---|---|---|
+| position impact pool distribution | 25,000 | yes |
+| GLV share-price conversion | 25,000 | yes |
+| GLV exit round-trip | 20,000 | yes |
+| GLV valuation input (short-circuit) | 20,000 | yes |
+| **`_getMarketTokenAmount` market loop** | **20,000** | **yes — harness deployed** |
+| swap amount application / fees / liquidation | 0 | untested |
+
+**No CRIT/HIGH/MEDIUM.** The GLV surface is now covered down to the market loop, which
+means the honest remaining gap is no longer GLV — it is the three untouched areas, and
+none of them has had a single run.
