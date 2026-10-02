@@ -196,3 +196,69 @@ in paths other than Omnipool's `sell`, #3 division-by-zero on empty pools, and
 #5 oracle-hook coverage for every reserve-changing operation. Those are the next
 reads, and #5 is the largest — it is the theme the $25k post-mortem actually
 exploited.
+
+---
+
+## Worked #5 (oracle hooks) and chased a slippage lead
+
+### #5 Oracle hook coverage — clean
+
+Mapped every state-mutating function in `omnipool` and `stableswap` against hook
+invocation. **Zero missing hooks.** `on_liquidity_changed` is fired inside
+`do_add_liquidity` (`:1628`, "All done and updated. let's call the
+on_liquidity_changed hook"), and `on_trade` via `call_on_trade_hook` on both trade
+paths (`:793`, `:899`). `add_assets_liquidity` looked like an omission in a
+first pass — it is a 10-line wrapper that delegates to `do_add_liquidity`, so the
+hook is reached. No stale-oracle path found in either pool.
+
+### The slippage lead — real gap, but a known class
+
+Chasing `add_assets_liquidity`'s missing local hook surfaced a genuine structural
+gap one layer down.
+
+`impl StableswapLiquidityMutation for Pallet<T>` (`stableswap/src/lib.rs:2155`):
+
+```rust
+fn add_liquidity(who, pool_id, assets) -> Result<Balance, DispatchError> {
+    Self::do_add_liquidity(&who, pool_id, &assets, Balance::zero())
+}
+```
+
+The trait method has **no `min_shares` parameter at all** and hardcodes zero. The
+asymmetry inside the same impl is the tell — `remove_liquidity` and
+`remove_liquidity_one_asset` both take and forward their minimums; only `add`
+discards protection.
+
+The sole production consumer is `omnipool-liquidity-mining`, whose extrinsic
+`add_liquidity_stableswap_omnipool_and_join_farms` (call_index 16) does:
+
+```rust
+let stablepool_shares = T::Stableswap::add_liquidity(who, stable_pool_id, stable_asset_amounts.to_vec())?;
+let min_shares_limit = min_shares_limit.unwrap_or(Balance::MIN);
+let position_id = OmnipoolPallet::<T>::do_add_liquidity(origin, stable_pool_id, stablepool_shares, min_shares_limit)?;
+```
+
+So the **stableswap leg executes irreversibly with zero slippage protection before
+the caller's limit is even evaluated**, and that limit applies to the Omnipool leg
+only. The function's own docstring concedes it: *"Applies to Omnipool step only.
+None defaults to no protection."* A user has no way to protect the stableswap leg
+through this entry point.
+
+**It is not novel.** Hydration's own catalogue lists the class under theme #4:
+
+> **No slippage check in `remove_liquidity` (Medium)** — *Source: Code4rena M-03,
+> RV Stableswap A6, OAK #5* — "Frontrunners can sandwich the transaction for ~1-2%
+> extraction. **Also applies to `add_liquidity` (no `min_shares_out`).**"
+
+Already reported three times over, with impact quantified at 1-2%. The direct
+extrinsic path was evidently fixed — `add_assets_liquidity` and
+`add_liquidity_with_limit` both take a real `min_shares`/`min_shares_limit`. What
+survives is the trait path, an instance of the documented class.
+
+The 1-2% figure is also consistent with first principles: adding liquidity to a
+*stable* pool mints shares near-proportional to the invariant, so the mint is far
+less sandwichable than a swap, and moving the pool costs the attacker. I did not
+demonstrate extraction, and on the available evidence would not claim it.
+
+**Verdict: not submittable.** A documented, thrice-reported class, with the
+residual instance being a specific path the catalogue already names.
