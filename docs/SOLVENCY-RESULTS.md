@@ -52,12 +52,30 @@ Note the datatype: `liquidationDepositAmount` is stored as **uint32**
 
 These exercise `AmmStorage` accounting in isolation. Untested and still open:
 
-- the floating-pool share maths on `Market` (`previewBorrow`/`previewRepay`/`previewRefund`
-  round-trip) — needs the full oracle/auditor/treasury stack deployed
-- the oracle rate model (`spread`) and sanity checks
-- `PowerToken`'s exchange rate, which is derived from a raw `balanceOf` and is
-  therefore donation-sensitive in principle
-- asset management and rebalance
+- asset management and rebalance (`AmmTreasuryBaseV2`, ERC4626 vault integration)
+- the demand-spread curve in `DemandSpreadLibs` — what actually bounds
+  `demandSpread`, which is added **after** the fixed-rate cap in
+  `OfferedRateCalculationLibs` and so is not bounded by it
+- `LiquidityMining` reward accounting (`CalculateWeightedLpTokenBalance*`, which
+  weights LP balances by a Chainlink `latestRoundData()` read)
+
+### Correction — 2026-10-02
+
+An earlier version of this file listed "the floating-pool share maths on `Market`
+(`previewBorrow`/`previewRepay`/`previewRefund`)" as untested. **That surface does
+not exist in this codebase.** There is no `Market.sol` and no `preview*` function
+anywhere under `ipor-protocol/contracts`; I grepped for it. IPOR's AMM is not a
+share-pool — it is a fixed-rate-per-tenor model where each swap carries its own
+collateral and notional and the rate comes from
+`Spread{28,60,90}Days.calculateAndUpdateOfferedRate*` via the spread router. So
+there was never a `previewBorrow` round trip to fuzz, and the "needs the full
+oracle/auditor/treasury stack deployed" caveat was describing an architecture that
+is not present.
+
+`PowerToken`'s donation sensitivity — also listed above as untested — has since
+been tested. See [`poc/IPOR_powertoken/REPORT.md`](../poc/IPOR_powertoken/REPORT.md):
+the mechanism is real and confirmed on deployed bytecode, but it is not
+profitable while the attacker's share of base supply is below 1.
 
 ## Verdict
 
