@@ -24,6 +24,8 @@ from cli.cs_rust import (
     scan,
     scan_debug_assert,
     scan_donation_shape,
+    scan_missing_origin_gate,
+    scan_swallowed_value_error,
     summary,
 )
 
@@ -205,3 +207,120 @@ def test_scan_does_not_crash_on_broken_input(tmp_path):
 
 def test_rust_extension_set_is_rs_only():
     assert RUST == {".rs"}
+
+# --------------------------------------------------------------- extractor
+#
+# The extractor required the opening brace on the signature line, so it matched
+# 7 of 89 `debug_assert!` sites in HydraDX-node. A 260k-line tree then reported
+# "2 findings" and looked clean when it had never really been examined. These pin
+# the multi-line cases that caused it.
+
+
+def test_multiline_signature_is_captured(tmp_path):
+    _write(tmp_path, "lib.rs", """
+        pub fn ensure_trade_invariant(
+            pool_id: T::AssetId,
+            initial_reserves: &[AssetReserve],
+        ) -> DispatchResult
+        {
+            debug_assert_eq!(a, b, "invariant");
+        }
+    """)
+    assert len(scan_debug_assert(tmp_path)) == 1
+
+
+def test_return_type_on_its_own_line_is_captured(tmp_path):
+    _write(tmp_path, "lib.rs", """
+        fn check_state(id: u32)
+            -> DispatchResult
+        {
+            debug_assert!(total(id) == 0, "unreachable");
+        }
+    """)
+    assert len(scan_debug_assert(tmp_path)) == 1
+
+
+def test_generic_and_nested_generics_do_not_break_extraction(tmp_path):
+    _write(tmp_path, "lib.rs", """
+        pub fn f<T: Config, V: Into<Option<(A, B)>>>(x: Vec<Option<u8>>) {
+            debug_assert_eq!(x.len(), 0, "x");
+        }
+    """)
+    assert len(scan_debug_assert(tmp_path)) == 1
+
+
+def test_r1_demotes_assert_guarding_saturating_arithmetic(tmp_path):
+    """debug_assert + saturating_div(0)==0 documents a precondition, not a gap."""
+    _write(tmp_path, "lib.rs", """
+        fn calculate_target_fee(current: &[(u32, u32)]) -> u32 {
+            let b: u32 = delta.block_diff;
+            debug_assert!(!b.is_zero(), "Block difference cannot be zero");
+            let r = delta.delta.saturating_div(&b);
+            r
+        }
+    """)
+    hits = scan_debug_assert(tmp_path)
+    assert len(hits) == 1
+    assert hits[0]["severity_hint"] == "low"
+
+
+def test_r3_clears_config_qualified_origin_gate(tmp_path):
+    """`<T as Config>::AuthorityOrigin::ensure_origin(origin)` is a real gate."""
+    _write(tmp_path, "lib.rs", """
+        #[pallet::call]
+        impl<T: Config> Pallet<T> {
+            pub fn remove_collateral_asset(
+                origin: OriginFor<T>,
+                asset_id: T::AssetId,
+            ) -> DispatchResult {
+                <T as Config>::AuthorityOrigin::ensure_origin(origin)?;
+                Collaterals::<T>::remove(asset_id);
+                Ok(())
+            }
+        }
+    """)
+    assert scan_missing_origin_gate(tmp_path) == []
+
+
+def test_r3_still_flags_genuinely_ungated_extrinsic(tmp_path):
+    _write(tmp_path, "lib.rs", """
+        #[pallet::call]
+        impl<T: Config> Pallet<T> {
+            pub fn set_fee(origin: OriginFor<T>, fee: Permill) -> DispatchResult {
+                Fee::<T>::put(fee);
+                Ok(())
+            }
+        }
+    """)
+    assert len(scan_missing_origin_gate(tmp_path)) == 1
+
+
+def test_r4_ignores_multiline_call_that_propagates(tmp_path):
+    """The `?` is usually on the closing line, not the opening one."""
+    _write(tmp_path, "lib.rs", """
+        fn ok() -> DispatchResult {
+            let _ = <T as Config>::Currency::burn_from(
+                debt_asset,
+                &pallet_acc,
+                debt_to_cover,
+                Preservation::Expendable,
+            )?;
+            Ok(())
+        }
+    """)
+    assert scan_swallowed_value_error(tmp_path) == []
+
+
+def test_r4_catches_burn_from_swallowed(tmp_path):
+    _write(tmp_path, "lib.rs", """
+        fn bad() -> DispatchResult {
+            let _ = <T as Config>::Currency::burn_from(
+                debt_asset,
+                &pallet_acc,
+                debt_to_cover,
+                Preservation::Expendable,
+            );
+            Ok(())
+        }
+    """)
+    assert len(scan_swallowed_value_error(tmp_path)) == 1

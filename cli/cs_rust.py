@@ -79,16 +79,43 @@ def rust_files(root: Path) -> list[Path]:
 
 
 def _fn_bodies(text: str) -> t.Iterator[tuple[str, int, str]]:
-    """Yield (fn_name, 1-based line of the signature, body) for brace-matched fns."""
+    """Yield (fn_name, 1-based line of `fn`, brace-matched body) for every `fn`.
+
+    Written by scanning forward from the `fn` keyword to the first `{` at paren
+    depth zero, rather than regexing the signature line. The regex version only
+    matched 7 of 89 `debug_assert!` sites in HydraDX-node, because FRAME
+    signatures routinely span lines and the opening brace is often on its own
+    line or after a multi-line `-> DispatchResult`. That undercount made a 260k
+    line tree look like it had 2 findings when it had never really been examined,
+    so this walks the source instead.
+    """
     lines = text.splitlines()
     for i, line in enumerate(lines):
-        m = _UNIT_FN.search(line)
+        m = re.search(r"\bfn\s+(\w+)", line)
         if not m:
             continue
+        # scan forward for the opening brace, tracking paren depth
+        depth_paren = 0
+        body_start_line = None
+        j = i
+        while j < len(lines) and j < i + 40:
+            for ch in lines[j]:
+                if ch in "([":
+                    depth_paren += 1
+                elif ch in ")]":
+                    depth_paren -= 1
+                elif ch == "{" and depth_paren <= 0:
+                    body_start_line = j
+                    break
+            if body_start_line is not None:
+                break
+            j += 1
+        if body_start_line is None:
+            continue  # trait declaration, or a signature we cannot close
         depth = 0
         started = False
         body: list[str] = []
-        for ln in lines[i:]:
+        for ln in lines[body_start_line:]:
             body.append(ln)
             for ch in ln:
                 if ch == "{":
@@ -98,6 +125,8 @@ def _fn_bodies(text: str) -> t.Iterator[tuple[str, int, str]]:
                     depth -= 1
             if started and depth <= 0:
                 break
+            if len(body) > 4000:
+                break  # pathological; do not let one file stall the sweep
         yield m.group(1), i + 1, "\n".join(body)
 
 
@@ -118,10 +147,26 @@ def scan_debug_assert(root: Path) -> list[dict[str, t.Any]]:
             # A bare `debug_assert!(false, ...)` is usually an unreachable arm,
             # not an invariant. Keep it but mark it lower-confidence.
             snippet = ""
+            asserted: set[str] = set()
             for ln in body.splitlines():
                 if _DEBUG_ASSERT.search(ln):
                     snippet = ln.strip()
-                    break
+                    # names the assert actually guards
+                    # No length filter: single-char names are extremely common
+                    # in this math code (`b`, `x`, `r`) and dropping them silently
+                    # disabled the saturating-arithmetic demotion entirely.
+                    asserted |= {w for w in re.findall(r"\b([a-z_][a-z0-9_]*)\b", ln)
+                                 if not w.endswith(("_assert", "debug"))}
+            # If a guarded name is consumed by saturating_* arithmetic the assert
+            # documents a precondition: the arithmetic degrades safely instead of
+            # panicking, so it is not a missing production check.
+            saturated = bool(re.search(r"saturating_(?:add|sub|mul|div|pow)", body))
+            hint = "high"
+            if "debug_assert!(false" in body:
+                hint = "low"
+            elif saturated and any(re.search(rf"saturating_\w*\(\s*&?{re.escape(n)}\b", body)
+                                     for n in asserted):
+                hint = "low"
             hits.append({
                 "class_id": "R1",
                 "class": "debug_assert as sole invariant enforcement (absent from release WASM)",
@@ -129,7 +174,7 @@ def scan_debug_assert(root: Path) -> list[dict[str, t.Any]]:
                 "file": str(f),
                 "line": line_no,
                 "snippet": snippet,
-                "severity_hint": "low" if "debug_assert!(false" in body else "high",
+                "severity_hint": hint,
             })
     return hits
 
@@ -228,9 +273,145 @@ def scan_donation_shape(root: Path) -> list[dict[str, t.Any]]:
     return hits
 
 
+# ------------------------------------------------------------------- R3 / R4
+
+# A `#[pallet::call]` impl block: every `pub fn` in it is a public extrinsic.
+_PALLET_CALL = re.compile(r"#\s*\[\s*pallet::call\s*\]")
+# The dispatch attribute in modern FRAME is `#[pallet::call_index = N]`; there is
+# no `pallet::dispatch` attribute. (There was an older `#[pallet::call]`-adjacent
+# form, but matching a nonexistent attribute yields silent zero results.)
+# The FIRST parameter must be an origin, or this is an internal helper - matching
+# any typed parameter set turns every internal fn into an "extrinsic".
+_DISPATCH_FN = re.compile(
+    r"(?:pub\s+)?fn\s+(\w+)\s*(?:<[^>]*>)?\s*\(\s*"
+    r"(origin\w*|o\w*)\s*:\s*(OriginFor<[^>]*>|RawOrigin<[^>]*>|T::Origin|OriginFor<[^>]*>\s*)\s*[,)]"
+)
+# Origin/authority gates. `ensure_origin` is the real FRAME idiom and must be
+# matched on its own: gates are configured as
+# `<T as Config>::AuthorityOrigin::ensure_origin(origin)`, so a literal
+# `T::UpdateOrigin` never appears and every properly-gated admin extrinsic gets
+# reported as ungated. Match the `<T as ...Config>::XOrigin` form too.
+_ORIGIN_GATE = re.compile(
+    r"ensure_signed|ensure_root|ensure_none|ensure_signed_or_root|"
+    r"ensure_origin\s*\(|"
+    r"::\s*[A-Za-z0-9_]*Origin\s*::\s*ensure_origin|"
+    r"RawOrigin|RawOriginWithSuccess|origin\.caller|"
+    r"ensure!\s*\(\s*origin",
+    re.I,
+)
+# A mutator: writes storage, moves balance, or mutates a pool/account.
+_MUTATION = re.compile(
+    r"(?:<[^>]*>::(?:insert|remove|mutate|try_mutate|append|take_from|mutate_exists)\b"
+    r"|\.(?:insert|remove|mutate|try_mutate|mutate_exists)\s*\(|"
+    r"T::Currency::(?:transfer|deposit_into_existing|withdraw|make_free_balance|slash_stash)"
+    r"|DepositFee|transfer_assets|Xcm::|set_(?:fee|price|rate|parameter|admin|owner)\b"
+    r"|TotalIssuance::|ShareIssuance::|mutate_account)",
+    re.I,
+)
+# Administrative read-only configuration writes that use their own gate style.
+_ADMIN_WRITE = re.compile(r"\bset_[a-z_]+\s*\(|\bupdate_[a-z_]+\s*\(")
+
+
+def scan_missing_origin_gate(root: Path) -> list[dict[str, t.Any]]:
+    """R3: a public extrinsic that mutates state with no origin/authority gate.
+
+    FRAME's `#[pallet::call]` makes an extrinsic public by default; the gate is
+    whatever the body checks. A mutator with no `ensure_signed!`/`ensure_root!`/
+    `T::UpdateOrigin` is either intentionally permissionless (a real design
+    choice, e.g. anyone may `swap`) or an access-control hole. Nothing in the
+    signature distinguishes them, which is exactly why it needs surfacing.
+    """
+    hits: list[dict[str, t.Any]] = []
+    for f in rust_files(root):
+        try:
+            text = f.read_text(errors="replace")
+        except OSError:
+            continue
+        if not _PALLET_CALL.search(text):
+            continue
+        # Every `fn` in a `#[pallet::call]` impl is a public extrinsic; the body
+        # is brace-matched rather than windowed, because a 3000-char window is
+        # both too short for a large extrinsic and too long to attribute a gate.
+        for fname, line_no, body in _fn_bodies(text):
+            sig_m = _DISPATCH_FN.match(body.splitlines()[0].strip() if body else "")
+            if not sig_m or not _MUTATION.search(body):
+                continue
+            if _ORIGIN_GATE.search(body):
+                continue
+            hits.append({
+                "class_id": "R3",
+                "class": "mutating extrinsic with no origin/authority gate found",
+                "fn": fname,
+                "file": str(f),
+                "line": line_no,
+                "snippet": body.splitlines()[0].strip()[:160],
+                "severity_hint": "needs-triage",  # permissionless is often intended
+            })
+    return hits
+
+
+# Errors discarded on a call that moves value. `.ok()`, `let _ =`, `unwrap_or_default`,
+# `unwrap_or(0)` and a bare `;` on a Result all swallow the reason.
+_SWALLOW = re.compile(r"\.ok\(\s*\)|let\s+_\s*=|\.unwrap_or_default\(\)|\.unwrap_or_else\(\|\s*\|\s*\w*\s*\)")
+_VALUE_CALL = re.compile(
+    r"(?:T::Currency|Currency)::(?:transfer|transfer_all|withdraw|slash_stash|deposit_into_existing|"
+    r"make_free_balance|repatriate_reserved_balance|transfer_assets|deposit_fee|burn\w*)\s*\("
+    r"|(?:DepositFee|DepositAll|Reserve|ReserveSchema)::deposit_fee\s*\(",
+    re.I,
+)
+
+
+def scan_swallowed_value_error(root: Path) -> list[dict[str, t.Any]]:
+    """R4: a currency/asset movement whose Result is discarded.
+
+    A failed transfer that is swallowed is a silent accounting loss or a stranded
+    balance. This fires on shape, not intent: `let _ = x.transfer(..)` is the same
+    whether the author meant to ignore it or did not realise it was a Result.
+    """
+    hits: list[dict[str, t.Any]] = []
+    for f in rust_files(root):
+        try:
+            text = f.read_text(errors="replace")
+        except OSError:
+            continue
+        lines = text.splitlines()
+        for i, line in enumerate(lines, 1):
+            if not _VALUE_CALL.search(line):
+                continue
+            # Statement window: FRAME calls are routinely wrapped over several
+            # lines, and the `?` that decides whether the Result was swallowed is
+            # usually on the *closing* line. Checking only the opening line
+            # flags every multi-line `let _ = ...burn_from(...)?` as swallowed.
+            stmt = ""
+            for j in range(i - 1, min(i + 14, len(lines))):
+                stmt += " " + lines[j].strip()
+                if ");" in lines[j] or ")" in lines[j] and ";" in lines[j]:
+                    break
+            if not _SWALLOW.search(stmt):
+                continue
+            # A log-and-propagate is not swallowing. `?` anywhere in the
+            # statement means the Result reaches the caller.
+            if re.search(r"\?(\s*[,;)]|$)", stmt) or re.search(r"\|\s*else|if\s+let\s+Err", stmt):
+                continue
+            hits.append({
+                "class_id": "R4",
+                "class": "value movement with a discarded Result",
+                "file": str(f),
+                "line": i,
+                "snippet": re.sub(r"\s+", " ", stmt).strip()[:200],
+                "severity_hint": "needs-triage",
+            })
+    return hits
+
+
 # ------------------------------------------------------------------- driver
 
-SCANNERS = {"R1": scan_debug_assert, "R2": scan_donation_shape}
+SCANNERS = {
+    "R1": scan_debug_assert,
+    "R2": scan_donation_shape,
+    "R3": scan_missing_origin_gate,
+    "R4": scan_swallowed_value_error,
+}
 
 
 def scan(
