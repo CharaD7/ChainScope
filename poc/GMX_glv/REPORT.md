@@ -156,3 +156,67 @@ is still read-only, and the `maximize` asymmetry is a reading, not a result.
 70,000 runs across three isolated arithmetic layers, and **no CRIT/HIGH/MEDIUM**. Every
 layer that needed an oracle, a market, a vault or a router remains unexecuted — which is
 also why the honest verdict is "the pure math is sound", not "GLV is sound".
+
+---
+
+## Addendum 2 — the valuation input to `_getMarketTokenAmount`
+
+Reached the layer the arithmetic campaigns could not, via the **shallow short-circuit**
+in `GlvUtils.getGlvValue`: when the GLV itself carries an oracle price, it returns
+`(maximize ? max : min) * totalSupply()` without touching a market. That short-circuit is
+exactly what `GlvWithdrawalUtils._getMarketTokenAmount` consumes, and it is the only
+part of the valuation path reachable without deploying a market, an oracle and a vault.
+
+**5 tests, 20,000 runs, all green.**
+
+| Test | Property |
+|---|---|
+| `testFuzz_exitUsesMin_andDepositUsesMax` | exit values at `min`, deposit at `max` |
+| `testFuzz_exitValuation_neverExceedsDepositValuation` | **the round-trip guard**: exit ≤ deposit |
+| `testFuzz_swapOfBounds_wouldBreakTheGuard` | with inverted bounds the exit *is* the richer side — pins the dependency |
+| `testFuzz_valuationScalesLinearlyWithSupply` | valuation == price × supply |
+| `testFuzz_valuationMonotonicInSupply` | monotone in supply |
+
+**The design is sound, and the asymmetry is real:** the withdrawal path calls
+`getGlvValue(..., maximize = false)` and the deposit path `true`, so the exit is always
+valued at the *lower* of the oracle's two prices. An oracle spread therefore moves
+against the withdrawer, which is the conservative direction.
+
+### The oracle dependency, stated precisely
+
+`IOracle.primaryPrices(address) returns (uint256 min, uint256 max)` — the interface
+declares the ordering explicitly and `Price.Props { uint256 min; uint256 max; }` matches.
+So the guard holds **iff the oracle honours its own interface.**
+
+`testFuzz_swapOfBounds_wouldBreakTheGuard` pins that: given inverted bounds the exit
+becomes the richer side. That is not a protocol bug — it is a correct function consuming
+malformed data — but it does mean the GLV exit's safety is **conditional on the oracle
+reporting `min <= max`**, which is worth knowing and is not asserted anywhere in the
+contract.
+
+### Third instance of the same test bug
+
+The V2 run failed initially with "exit valued ABOVE the deposit". Cause: I bounded the
+`min_` and `max_` fuzz arguments **independently**, so the fuzzer supplied
+`min_ = 3.438e29 > max_ = 9.953e23` — a malformed oracle. The contract then correctly
+took the larger of the pair.
+
+Third time this session (after the impact-pool monotonicity bound and the GLV
+`floatToWei` double-scale). **Fuzzers punish independently-bounded related inputs**,
+and the failure always looks like a protocol finding until you read it.
+
+### Coverage after three campaigns
+
+| area | runs | executed |
+|---|---|---|
+| position impact pool distribution | 25,000 | yes |
+| GLV share-price conversion | 25,000 | yes |
+| GLV exit round-trip | 20,000 | yes |
+| GLV valuation input (`getGlvValue` short-circuit) | 20,000 | yes |
+| `_getMarketTokenAmount` market loop | 0 | **still read-only** |
+| swap amount application / fees / liquidation | 0 | untested |
+
+**90,000 runs. No CRIT/HIGH/MEDIUM.** The `getGlvValue` short-circuit is now executed,
+so the earlier caveat that `maximize` was "a reading, not a result" is resolved for that
+branch. What remains unexecuted is the per-market loop beneath it, which needs a market,
+a pool value and market token balances deployed.
