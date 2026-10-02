@@ -108,3 +108,51 @@ Worth recording, since each would have been publishable had I not traced it.
 
 All three were the fuzzer testing my reasoning rather than the protocol. In every
 case the protocol was correct.
+
+
+---
+
+## Addendum — GLV exit path (`GlvWithdrawalUtils`)
+
+The exit path is the one where rounding runs in the direction that can steal:
+deposit rounding favours the vault, so bugs there are self-harming; withdraw
+rounding does not.
+
+**5 tests, 20,000 runs, all green.**
+
+| Test | Property |
+|---|---|
+| `testFuzz_roundTrip_neverProfits` | deposit d → withdraw returns USD ≤ d at a constant ratio |
+| `testFuzz_repeatedRoundTrips_doNotAccumulate` | up to 8 consecutive cycles never extract more than one deposit each |
+| `testFuzz_exitRoundsDown` | `usd*supply <= value*amount` — exit never rounds up |
+| `testFuzz_fullSupplyWithdrawal_neverExceedsVault` | withdrawing the entire supply cannot exceed the vault's value |
+| `test_zeroSupplyWithdrawal_reverts` | `EmptyGlvTokenSupply` pinned |
+
+What reading established, and the tests now pin: the exit is two conversions, both
+via `Precision.mulDiv` → OZ `Math.mulDiv`, which rounds **down**, and
+`_getMarketTokenAmount` calls `getGlvValue(..., maximize = false)` where the deposit
+path passes `true`. That asymmetry is deliberate and against the withdrawer.
+
+**Coverage, stated honestly — again.** Executed: `usdToGlvTokenAmount` (19 lines) and
+`glvTokenAmountToUsd` (12 lines). **Not** executed: `_getMarketTokenAmount` itself
+(32 lines), which composes those two with oracle prices, market pool value and market
+token supply, and cannot run without a market, an oracle and a GLV vault deployed.
+
+So the arithmetic composing the exit is now pinned at 20,000 runs. The wiring above it
+is still read-only, and the `maximize` asymmetry is a reading, not a result.
+
+### Cumulative GMX
+
+| area | runs | status |
+|---|---|---|
+| position impact pool distribution | 25,000 | executed, clean |
+| GLV share-price conversion | 25,000 | executed, clean |
+| GLV exit round-trip | 20,000 | executed, clean |
+| `_getMarketTokenAmount` wiring | 0 | read only |
+| swap amount application | 0 | untested |
+| fee distribution | 0 | untested |
+| liquidation | 0 | untested |
+
+70,000 runs across three isolated arithmetic layers, and **no CRIT/HIGH/MEDIUM**. Every
+layer that needed an oracle, a market, a vault or a router remains unexecuted — which is
+also why the honest verdict is "the pure math is sound", not "GLV is sound".
