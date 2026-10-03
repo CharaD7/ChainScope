@@ -76,13 +76,42 @@ got there.
 The last row is the only one that works, and the three before it are the same failure
 mode I hit all session: **measuring something other than the thing being asked about.**
 
+## Scope completion
+
+Follow-up pass over the programmes that do not publish addresses. Only **one** of the
+remaining high-ceiling set publishes them:
+
+| programme | published addresses | repos |
+|---|---|---|
+| gnosischain | 4 (2 parseable on mainnet) | 2 |
+| wormhole | 0 | 3 |
+| chainlink | 0 | 11 |
+| lido | 0 | 19 |
+| arbitrum | 0 | 4 |
+| stacks | 0 | 1 |
+
+Both parseable gnosischain addresses are **direct contracts** —
+`0x4aa42145Aa6Ebf72e164C9bBC74fbD3788045016` and
+`0x88ad09518695c6c3712AC10a214bE5109a655671` — with no EIP-1967 slot set on either, so
+no init surface and nothing to resolve.
+
+So **every in-scope address that is published is now swept**: 336 mainnet addresses
+across 10 programmes, 60 proxies, 23 distinct implementations, zero where
+`initialize()` would succeed.
+
+Two slugs I had been using were simply wrong — `gnosis` should be `gnosischain` — so
+that programme had been silently absent from the earlier sweep rather than clean.
+Curve, Pendle, Morpho, Eigenlayer, Jupiter, Swell and Polymarket are not live
+programmes at all.
+
 ## Honest caveat
 
-This covers the **mainnet** in-scope addresses of 9 programmes. Not covered:
+This covers the **mainnet** in-scope addresses of 10 programmes. Not covered:
 
-- The remaining high-ceiling programmes whose scope is not published as addresses
-  (wormhole, chainlink, lido, gnosis, arbitrum, stacks, curve, pendle, morpho,
-  eigenlayer) — their scope is repo- or page-defined and needs reading directly.
+- The five repo-scoped programmes (wormhole, chainlink, lido, arbitrum, stacks —
+  38 repos between them). Their deployment addresses are not published in scope, so
+  they have to be derived from the repos themselves, which is a manual exercise per
+  programme rather than a sweep.
 - Non-mainnet deployments of the same programmes.
 - The **admin key** itself: the optimism proxy above has a live owner,
   `0x5a0aae59d09fccbddb6c6cceb07b7279367c3d2a`. Initialisation safety is not
