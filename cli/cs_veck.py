@@ -48,7 +48,11 @@ CLASSES: list[dict[str, typing.Any]] = [
         "why": "Attacker calls initialize() on the implementation, takes ownership, then selfdestructs or upgrades the proxy into a state they control.",
         "look": "Any OZ Initializable / UUPS / custom proxy factory. Wormhole $10M was paid for exactly this.",
         "strong": [
-            r"function\s+initialize\s*\([^)]*\)\s*external(?!.*only)",
+            # (?!.*only) excludes role-gated init. The trailing (?!...;) is a LOOKAHEAD
+            # because the check is forward-looking: an interface DECLARATION ends in
+            # `external;` while an implementation body continues with `external {`.
+            # A lookbehind would be illegal here - Python's re requires fixed width.
+            r"function\s+initialize\s*\([^)]*\)\s*external(?!.*only)(?!\s*;)",
         ],
         "weak": [
             r"selfdestruct\s*\(",
@@ -193,7 +197,10 @@ CLASSES: list[dict[str, typing.Any]] = [
         "why": "delegatecall runs attacker code in this contract's storage; writing slot 0 overrides owner and hands over control.",
         "look": "Routers, ERC-4337 accounts, multisig implementations, execution proxies.",
         "strong": [
-            r"delegatecall\s*\(\s*(?![\"'])",
+            # key on the TARGET expression, not the first argument. The old
+            # (?![\"']) lookahead sat after delegatecall( and so inspected
+            # the argument, letting `"0x1234".delegatecall(data)` fire.
+            r"(\w[\w.\[\]]*)\.delegatecall\s*\(",
         ],
         "weak": [r"function\s+execute\s*\("],
     },
@@ -202,11 +209,12 @@ CLASSES: list[dict[str, typing.Any]] = [
         "name": "Bridge proof verification / relayer logic",
         "why": "Malformed proof, replayed receipt hash, or a verifier bypass mints bridged tokens with no backing deposit.",
         "look": "Merkle/ZK/threshold-sig bridges, L2 lock-and-mint, LayerZero/Wormhole.",
-        "strong": [
+"strong": [
             r"verifyCalldata\s*\(|MerkleProof\.verify|processProof\s*\(",
-            r"finalizeDeposit|finalizeWithdrawal|completeDeposit",
         ],
-        "weak": [r"nonce", r"relayer"],
+        # A finaliser with no proof logic is worth reading but is not evidence of
+        # a broken check, so it navigates rather than counts.
+        "weak": [r"nonce", r"relayer", r"finalizeDeposit|finalizeWithdrawal|completeDeposit"],
     },
     {
         "id": 14,
@@ -275,7 +283,9 @@ CLASSES: list[dict[str, typing.Any]] = [
         "strong": [
             r"swapExactTokensFor(Token|ETH)SupportingFeeOnTransferTokens",
             r"amountOutMin(imum)?\s*=\s*0\b",
-            r"getAmountOut\s*\([^)]*reserve",
+            # getAmountOut over reserves is ordinary AMM code, not a finding.
+            # The zero-slippage form above is the real signal.
+            r"amountOutMin(imum)?\s*=\s*0\b",
         ],
         "weak": [
             r"deadline",
