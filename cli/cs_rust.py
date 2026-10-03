@@ -251,7 +251,7 @@ def scan_donation_shape(root: Path) -> list[dict[str, t.Any]]:
             # The mitigation has to be resolved through the same indirection as
             # the flag, or `let supply = total_supply(); if supply == 0` reads as
             # unguarded when it is exactly the guard.
-            if re.search(r"\bif\s+\w+\s*(?:==|<=)\s*0\b", window) and (
+            if re.search(r"\bif\s*\(?\s*\w+\s*(?:==|<=)\s*0", window) and (
                 issuance_names & window_words
             ):
                 continue
