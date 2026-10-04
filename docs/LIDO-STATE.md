@@ -74,3 +74,32 @@ implementation bytecode, which is the known open item in `cs_init`.
 4. **`Stonks`** (`0x8c595aA4…` LP, `0xb368586C…` Treasury) — the LP vault, which is the
    donation/share family that has produced findings across three other protocols this
    session.
+
+## `Accounting` solvency math — verified sound, and a near-miss of mine
+
+Reward bands make this the contract that matters: **Critical $50k–$2M requires ≥$2M of
+user funds at risk**, so the solvency math is where the money is.
+
+`_calculateFeeDistribution` (`Accounting.sol:335`):
+
+```solidity
+uint256 moduleFeeShares = (_totalSharesToMintAsFees * moduleFee) / _totalFee;
+totalModuleFeeShares += moduleFeeShares;
+...
+treasurySharesToMint = _totalSharesToMintAsFees - totalModuleFeeShares;   // :356
+```
+
+Concern: whether the summed per-module floors can exceed the total, underflowing that
+subtraction and reverting the oracle report.
+
+**My first property test said yes — 150,835 "violations" in 200,000 trials.** That
+would have been a Critical solvency finding.
+
+**My test was wrong.** I generated each module's fee independently, so their sum exceeded
+`_totalFee`. The real precondition is that `stakingModuleFees` **partitions** `_totalFee`.
+
+Under the correct precondition: **0 violations in 300,000 trials** — `total - sum` cannot
+underflow and the distribution is sound. Line 331's `postInternalEther - feeEther`
+denominator is bounded by 0.8.9 checked arithmetic, so it reverts rather than wrapping.
+
+**No finding in Accounting.**
