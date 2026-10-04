@@ -41,6 +41,8 @@ import urllib.request
 
 import typer
 
+from core.cs_audit_baseline import baseline, corpus_for, summarise
+
 app = typer.Typer()
 
 _INDEX = "https://immunefi.com/bug-bounty/"
@@ -890,6 +892,50 @@ def show_meta(
     typer.echo(f"  audits ({row['audits']}) — findings here are likely ineligible:")
     for a in row["audit_refs"]:
         typer.echo(f"    {a['auditor']}  {a['date']}  {a['url']}")
+
+    # The bounty-page `audits[]` array under-reports badly for programs that
+    # publish reports in a repo instead (Lido reports 0 while holding 164).
+    # Resolve the external corpus so the dedup surface is not silently wrong.
+    if corpus_for(slug):
+        try:
+            ext = baseline(slug, timeout=90)
+        except Exception as exc:  # network/decoding must not break `meta`
+            typer.echo(f"  external audits: lookup failed ({exc})")
+            return
+        if ext.get("ok"):
+            typer.echo(
+                f"  external audits: {ext['total_reports']} report(s) in "
+                f"{ext['repo']} — use `immune baseline {slug} --scope ...` to filter"
+            )
+
+
+@app.command(name="baseline")
+def show_baseline(
+    slug: str = typer.Argument(..., help="Immunefi program slug (e.g. 'lido')"),
+    scope: str = typer.Option("", "--scope", help="Scope filter, e.g. 'CSM v3'"),
+    since: str = typer.Option("", "--since", help="Only reports dated YYYY-MM or later"),
+    repo: str = typer.Option("", "--repo", help="Override the audit repository"),
+    branch: str = typer.Option("main", "--branch", help="Audit repo branch"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
+    """Resolve the external audit corpus that forms the real dedup surface.
+
+    Immunefi's per-program `audits[]` array is not authoritative: Lido reports
+    `audits (0)` while `lidofinance/audits` holds 164 reports, two of which
+    cover CSM v3 and CM v2 exactly.
+    """
+    try:
+        result = baseline(
+            slug, scope_query=scope, since=since, repo=repo, branch=branch, timeout=90
+        )
+    except (urllib.error.URLError, RuntimeError, json.JSONDecodeError) as exc:
+        typer.echo(f"audit baseline lookup failed: {exc}", err=True)
+        raise typer.Exit(1)
+
+    if json_output:
+        typer.echo(json.dumps(result, indent=2))
+        return
+    typer.echo(summarise(result))
 
 
 @app.command(name="triage")
