@@ -58,3 +58,33 @@ Also worth noting: `vm.store` into `BridgingManager`'s proxy slot (needed to fli
 `whenDepositsEnabled` on the full gateway) silently did nothing in this setup. Testing
 the library directly avoided it, which is also the more honest test — the proxy slot is
 deployment wiring, not the question being asked.
+
+---
+
+## 21-class recon on lido-l2, and the two class-1 hits
+
+`cli veck scan contracts/` over 36 files: **13 hits, 3 strong** — all class 1
+(uninitialised proxy), plus 4 weak class-7, 3 weak class-9, 3 weak class-13.
+No class 4/15/16/18/19 hits, so no rounding, flash-mint, flash-loan, slippage or
+vault-donation candidates here.
+
+Both strong hits are guarded, and neither is a finding:
+
+| contract | guard |
+|---|---|
+| `BridgingManager.sol:37` | `if (s.isInitialized) revert ErrorAlreadyInitialized();` — explicit reinit protection |
+| `token/ERC20Bridged.sol:33` | no explicit flag, but the setters it calls enforce it: `_setERC20MetadataName` reverts with `ErrorNameAlreadySet()` when non-empty, so the pair can only ever be set once |
+
+The third strong hit is `proxy/stubs/VersionizedImplementationStub.sol` — a test stub,
+not production.
+
+`ERC20Bridged.initialize` is the interesting one: **`external`, unguarded, no
+`isInitialized` flag**, which is exactly the shape class 1 exists to catch. It survives
+only because the metadata setters it calls refuse to overwrite. That is a real property
+of the code and it held on reading, but it is load-bearing on an *empty-string* check
+rather than an initialisation flag — worth noting for anyone extending the token, since
+a future setter that bypasses the empty check would re-open a rename path on a bridged
+token (a phishing vector on exchange listings).
+
+Not a finding. Clean negative, and the fourth time this session a scanner hit
+required reading before it could be called one.
