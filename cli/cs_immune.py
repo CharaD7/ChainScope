@@ -725,6 +725,71 @@ def list_programs(
         typer.echo(json.dumps(rows, indent=2))
 
 
+
+# --- local audit-corpus discovery -------------------------------------------
+# Immunefi's per-program `audits[]` field is unreliable: Gearbox reports
+# `audits: 0` on the page while the workspace holds 31 published report PDFs.
+# Scoring `unmined` off the page field alone therefore ranks already-mined
+# programs as untouched, which is the exact opposite of what triage needs.
+# When a program folder exists locally, prefer what is on disk.
+_LOCAL_AUDIT_DIRS = ("security/audits", "audits", "security-reports", "reports")
+
+
+def find_local_audits(workspace: str, slug: str) -> tuple[int, str]:
+    """Return (pdf_count, newest_audit_iso_date) for a program folder."""
+    import glob as _glob
+    import os as _os
+    import re as _re
+
+    root = _os.path.join(workspace, slug)
+    if not _os.path.isdir(root):
+        # Immunefi slugs are lower-case; the workspace folders are not
+        # (GMX, Lido, Aave...). Resolve case-insensitively or the signal
+        # silently reads 0 for every mixed-case folder -- which is exactly how
+        # Gearbox was the only program detected.
+        try:
+            entries = {e.lower(): e for e in _os.listdir(workspace)}
+        except OSError:
+            return 0, ""
+        hit = entries.get(slug.lower())
+        if not hit or not _os.path.isdir(_os.path.join(workspace, hit)):
+            return 0, ""
+        root = _os.path.join(workspace, hit)
+    pdfs: list[str] = []
+    for sub in _LOCAL_AUDIT_DIRS:
+        pdfs += _glob.glob(_os.path.join(root, sub, "**", "*.pdf"), recursive=True)
+    if not pdfs:
+        pdfs = _glob.glob(_os.path.join(root, "**", "*.pdf"), recursive=True)
+    pdfs = [f for f in pdfs if "/node_modules/" not in f]
+    if not pdfs:
+        return 0, ""
+
+    mon = {m: i for i, m in enumerate(
+        ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
+    best = ""
+    for f in pdfs:
+        b = _os.path.basename(f)
+        m = _re.match(r"(\d{4})-(\d{2})(?:-|\s)", b)
+        y, mo = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+        if not y:
+            m = _re.match(r"(\d{4})[- ]?([A-Za-z]{3})", b)
+            if m:
+                y, mo = int(m.group(1)), mon.get(m.group(2).lower(), 0)
+            else:
+                m2 = _re.search(r"(20\d{2})", b)
+                y = int(m2.group(1)) if m2 else 0
+        if y and (not best or (y, mo) > best):
+            best = (y, mo)
+    return len(pdfs), (f"{best[0]:04d}-{best[1]:02d}" if best and best[1] else (f"{best[0]:04d}" if best else ""))
+
+
+def _workspace() -> str:
+    """Parent of the ChainScope checkout, i.e. where the per-program folders live."""
+    import os as _o
+    here = _o.path.dirname(_o.path.dirname(_o.path.abspath(__file__)))
+    return _o.path.abspath(_o.path.join(here, ".."))
+
+
 def _keizo(p: dict[str, typing.Any], now: float) -> dict[str, typing.Any]:
     """Rank by signals Immunefi actually exposes.
 
@@ -743,7 +808,14 @@ def _keizo(p: dict[str, typing.Any], now: float) -> dict[str, typing.Any]:
     # to populate a field, so prefer independent audit EVIDENCE when available.
     n_audits = row.get("audits", 0)
     has_ev = bool(row.get("audit_evidence"))
-    if has_ev:
+    local_n, local_newest = find_local_audits(_workspace(), str(p.get("slug") or ""))
+    row["local_audits"] = local_n
+    row["local_newest_audit"] = local_newest
+    if local_n and not has_ev:
+        # Reports on disk beat the page field. Scale so a real corpus lands in
+        # the same range the page-driven heuristic would produce.
+        load = min(1.0, local_n / 6.0)
+    elif has_ev:
         # evidence of review: count firms/urls, default to a meaningful load even at 0
         load = max(min(1.0, len(row.get("audit_firms", [])) / 3.0),
                     0.5 if row.get("audit_urls") else 0.0)
@@ -776,6 +848,9 @@ def _keizo(p: dict[str, typing.Any], now: float) -> dict[str, typing.Any]:
         "unmined": round(1.0 - dedup_load, 3),
         "dedup_load": round(dedup_load, 3),
         "audit_evidence": has_ev,
+        "local_audits": local_n,
+        "local_newest_audit": local_newest,
+        "page_field_unreliable": bool(local_n > (row.get("audits") or 0)),
         "primacy_impact": impact,
         "poc_required": poc,
         "status": status,
