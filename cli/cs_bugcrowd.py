@@ -93,7 +93,11 @@ def _row(e: dict[str, typing.Any]) -> dict[str, typing.Any]:
         "tagline": e.get("tagline"),
         "url": f"https://bugcrowd.com/engagements/{slug}",
         "brief_url": e.get("briefUrl"),
-        "max_bounty": _money(rs.get("maxReward") or rs.get("hint") or rs.get("summary")),
+        "max_bounty": max(
+            _money(rs.get("maxReward")),
+            _money(rs.get("hint")),
+            _money(rs.get("compensationSummary")),
+        ),
         "min_bounty": _money(rs.get("minReward")),
         "reward_summary": rs.get("summary"),
         "scope_rank": e.get("scopeRank"),
