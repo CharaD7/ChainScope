@@ -43,6 +43,7 @@ _CHAIN_IDS: dict[str, int] = {
     "10": 10, "optimism": 10, "op": 10,
     "137": 137, "polygon": 137,
     "999": 999, "hyperevm": 999, "hyperliquid": 999,
+    "388": 388, "cronos_zkevm": 388, "cronoszkevm": 388, "zkevm.cronos.org": 388,
 }
 
 
