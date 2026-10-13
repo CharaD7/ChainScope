@@ -320,5 +320,203 @@ def triage(
         typer.echo(json.dumps({"scope": scope, "fetched": len(ok), "errors": len(bad), "hotspots": hotspots}, indent=2))
 
 
+def _to_float(v: typing.Any) -> float:
+    try:
+        return float(v or 0)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _decode_nuxt(data: list, idx: int, depth: int = 0) -> typing.Any:
+    """Decode HackenProof's Nuxt payload (flat array with int-reference nesting)."""
+    if not isinstance(idx, int) or idx < 0 or idx >= len(data) or depth > 25:
+        return idx
+    item = data[idx]
+    if isinstance(item, str):
+        return item
+    if isinstance(item, (int, float, bool, type(None))):
+        return item
+    if isinstance(item, dict):
+        return {k: _decode_nuxt(data, v, depth + 1) if isinstance(v, int) else v for k, v in item.items()}
+    if isinstance(item, list):
+        return [_decode_nuxt(data, x, depth + 1) if isinstance(x, int) else x for x in item]
+    return item
+
+
+def _fetch_program_detail(slug: str, timeout: int = 45) -> dict[str, typing.Any]:
+    """Fetch and decode a HackenProof program's full detail page (all tabs)."""
+    import re
+    import urllib.error
+
+    url = f"https://hackenproof.com/programs/{slug}"
+    html = ""
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+                "Accept": "text/html",
+            })
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                html = resp.read().decode("utf-8", "ignore")
+            break
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last_exc = exc
+            time.sleep(2 * (attempt + 1))
+    if not html:
+        return {"error": f"fetch failed: {last_exc}"}
+
+    m = re.search(r'<script[^>]*id="__NUXT_DATA__"[^>]*>(.*?)</script>', html, re.S)
+    if not m:
+        return {"error": "no Nuxt payload found"}
+    data = json.loads(m.group(1))
+
+    # Program object is always at index 5 in the payload
+    if len(data) < 6 or not isinstance(data[5], dict):
+        return {"error": "program object not found in payload"}
+    prog_raw = data[5]
+
+    def dec(key: str) -> typing.Any:
+        v = prog_raw.get(key)
+        return _decode_nuxt(data, v) if isinstance(v, int) else v
+
+    # Scopes: list of {criticality, target, out_of_scope, ...}
+    scopes_raw = dec("scopes")
+    scopes: list[dict[str, typing.Any]] = []
+    if isinstance(scopes_raw, list):
+        for s in scopes_raw:
+            if isinstance(s, dict):
+                scopes.append({
+                    "criticality": s.get("criticality"),
+                    "target": s.get("target"),
+                    "out_of_scope": s.get("out_of_scope"),
+                })
+
+    # customBlocks: list of {title, description, position}
+    blocks_raw = dec("customBlocks")
+    custom_blocks: list[dict[str, typing.Any]] = []
+    if isinstance(blocks_raw, list):
+        for b in blocks_raw:
+            if isinstance(b, dict):
+                custom_blocks.append({
+                    "title": b.get("title"),
+                    "description": b.get("description"),
+                    "position": b.get("position"),
+                })
+    custom_blocks.sort(key=lambda b: b.get("position") or 0)
+
+    rewards = dec("rewards")
+    sla = dec("sla")
+    activity = dec("activityStatus")
+    labels = dec("labels")
+
+    return {
+        "slug": slug,
+        "url": url,
+        "title": dec("title"),
+        "company": dec("companyName"),
+        "status": (activity or {}).get("name") if isinstance(activity, dict) else None,
+        "is_unending": bool(dec("isUnending")),
+        "is_triaged": bool(dec("isTriaged")),
+        "is_audit": bool(dec("isAudit")),
+        "max_bounty": _to_float(dec("maxBounty")),
+        "min_bounty": _to_float(dec("minBounty")),
+        "max_reward_label": dec("maxReward"),
+        "min_reputation": _to_float(dec("minReputation")) or None,
+        "submission_fee": _to_float(dec("submissionFee")) or None,
+        "kyc_required": bool(dec("kycRequired")),
+        "poc_required": bool(dec("pocRequired")),
+        "total_rewards_paid": _to_float(dec("totalRewards")),
+        "submitted_reports": _to_float(dec("submittedReports")),
+        "start_date": dec("startDate"),
+        "end_date": dec("endDate"),
+        "labels": labels,
+        "description": dec("description"),
+        "focus_area": dec("focusArea"),
+        "program_rules": dec("programRules"),
+        "disclosure_guidelines": dec("disclosureGuidelines"),
+        "eligibility": dec("eligibilityAndCoordinateDisclosure"),
+        "rewards_by_threat": rewards,
+        "sla": sla,
+        "scopes": scopes,
+        "custom_blocks": custom_blocks,
+        "submit_url": dec("submitUrl"),
+    }
+
+
+@app.command(name="details")
+def program_details(
+    slug: str = typer.Argument(..., help="HackenProof program slug"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
+    """Fetch a program's full detail page: scope, focus area, rules, rewards, audits, PoC, terms."""
+    detail = _fetch_program_detail(slug)
+    if "error" in detail:
+        typer.echo(f"error: {detail['error']}", err=True)
+        raise typer.Exit(1)
+
+    e = typer.echo
+    e(f"\n{'='*70}")
+    e(f"  {detail['title']}  ({detail['company']})")
+    e(f"  {detail['url']}")
+    e(f"{'='*70}")
+    e(f"  Status       : {detail['status']}  unending={detail['is_unending']}  triaged={detail['is_triaged']}")
+    e(f"  Bounty       : ${detail['max_bounty']:,.0f}  (label: {detail['max_reward_label']})")
+    e(f"  Min bounty   : ${detail['min_bounty']:,.0f}")
+    e(f"  Rep required : {detail['min_reputation'] if detail['min_reputation'] is not None else 'none'}")
+    e(f"  Fee          : {detail['submission_fee'] if detail['submission_fee'] is not None else 'none'}")
+    e(f"  KYC          : {detail['kyc_required']}  PoC: {detail['poc_required']}")
+    e(f"  Reports      : {detail['submitted_reports']:.0f}  Paid: {detail['total_rewards_paid']:.0f}")
+    e(f"  Dates        : {detail['start_date']} -> {detail['end_date'] or 'unending'}")
+    e(f"  Labels       : {detail['labels']}")
+
+    rw = detail.get("rewards_by_threat") or {}
+    if isinstance(rw, dict):
+        e(f"\n--- Rewards by Threat Level ---")
+        for level in ["critical", "high", "medium", "low"]:
+            mn, mx = rw.get(f"{level}_min"), rw.get(f"{level}_max")
+            if mn is not None or mx is not None:
+                e(f"  {level.upper():<10} ${mn or 0:>10,.0f} - ${mx or 0:>10,.0f}")
+
+    scopes = detail.get("scopes") or []
+    if scopes:
+        e(f"\n--- Scope ({len(scopes)} targets) ---")
+        for s in scopes:
+            oos = " [OUT]" if s.get("out_of_scope") else ""
+            e(f"  {s.get('criticality', '?'):<10}{oos}  {s.get('target', '?')}")
+
+    if detail.get("focus_area"):
+        e(f"\n--- Focus Area ---")
+        e(detail["focus_area"])
+
+    if detail.get("program_rules"):
+        e(f"\n--- Program Rules ---")
+        e(detail["program_rules"])
+
+    if detail.get("disclosure_guidelines"):
+        e(f"\n--- Disclosure Guidelines ---")
+        e(detail["disclosure_guidelines"])
+
+    if detail.get("eligibility"):
+        e(f"\n--- Eligibility & Disclosure ---")
+        e(detail["eligibility"])
+
+    blocks = detail.get("custom_blocks") or []
+    if blocks:
+        e(f"\n--- Custom Blocks ({len(blocks)}) ---")
+        for b in blocks:
+            e(f"\n  ## {b.get('title', '(untitled)')}")
+            e(f"  {b.get('description', '')}")
+
+    sla = detail.get("sla") or {}
+    if isinstance(sla, dict) and sla:
+        e(f"\n--- SLA ---")
+        e(f"  First response: {sla.get('first_response')}h  Triage: {sla.get('time_to_triage')}h")
+        e(f"  Resolution: {sla.get('resolution_time')}d  Reward: {sla.get('time_to_reward')}d")
+
+    if json_output:
+        e(json.dumps(detail, indent=2, default=str))
+
+
 if __name__ == "__main__":
     app()
