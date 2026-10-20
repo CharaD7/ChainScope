@@ -1,0 +1,71 @@
+{
+  "targets": {
+    "cronos_launch_factory_impl": "0x823ee5d7765faa241a23b1e73244527321485f15",
+    "cronos_launch_router_impl": "0xbb5660616864e13550700ae985545c29b8959e2e",
+    "cronos_launch_bonding_impl": "0x188ea72a26448012431be4d4caabe78421fa36b6",
+    "cronos_launch_factory_proxy": "0x227205a020bD5522E45436176d85603d2dCC43C5",
+    "cronos_launch_router_proxy": "0xE39873Ffe547CeCdBA62e032B08c332c597Ea695",
+    "cronos_launch_bonding_proxy": "0xA18f14a35853bC619132bA9e126Bf2Ec63183C8E",
+    "fulcrom_stakedflpdistributor_impl": "0x20d6e81f229fb180af83c6c2eb5d4df4e2ae9714",
+    "fulcrom_fulvester_flpvester_impl": "0x499a141701297252aea150033fc3f36a20e9f62d",
+    "fulcrom_rewardrouter_impl": "0x57b775d25aa88e398bd0f69d74f078805ebccb1d",
+    "fulcrom_stakedflpdistributor_proxy": "0x629A8dd6BfF07844b25130ed659990d65e22Baaa",
+    "fulcrom_fulvester_proxy": "0xA461fA4BF68C72369DB4fA8eD7cba4796598F2B0",
+    "fulcrom_flpvester_proxy": "0x27E51D2B5A3283bEF4014519F095AB8dDCf023F6",
+    "fulcrom_rewardrouter_proxy": "0x133B7f9570b3be8e51CCd5DA4654C3DDe7657Ae1"
+  },
+  "sizes": {
+    "cronos_launch_factory_impl": {
+      "address": "0x823ee5d7765faa241a23b1e73244527321485f15",
+      "size": 7315
+    },
+    "cronos_launch_router_impl": {
+      "address": "0xbb5660616864e13550700ae985545c29b8959e2e",
+      "size": 8202
+    },
+    "cronos_launch_bonding_impl": {
+      "address": "0x188ea72a26448012431be4d4caabe78421fa36b6",
+      "size": 19748
+    },
+    "cronos_launch_factory_proxy": {
+      "address": "0x227205a020bD5522E45436176d85603d2dCC43C5",
+      "size": 170
+    },
+    "cronos_launch_router_proxy": {
+      "address": "0xE39873Ffe547CeCdBA62e032B08c332c597Ea695",
+      "size": 170
+    },
+    "cronos_launch_bonding_proxy": {
+      "address": "0xA18f14a35853bC619132bA9e126Bf2Ec63183C8E",
+      "size": 170
+    },
+    "fulcrom_stakedflpdistributor_impl": {
+      "address": "0x20d6e81f229fb180af83c6c2eb5d4df4e2ae9714",
+      "size": 3580
+    },
+    "fulcrom_fulvester_flpvester_impl": {
+      "address": "0x499a141701297252aea150033fc3f36a20e9f62d",
+      "size": 9135
+    },
+    "fulcrom_rewardrouter_impl": {
+      "address": "0x57b775d25aa88e398bd0f69d74f078805ebccb1d",
+      "size": 13287
+    },
+    "fulcrom_stakedflpdistributor_proxy": {
+      "address": "0x629A8dd6BfF07844b25130ed659990d65e22Baaa",
+      "size": 2112
+    },
+    "fulcrom_fulvester_proxy": {
+      "address": "0xA461fA4BF68C72369DB4fA8eD7cba4796598F2B0",
+      "size": 2112
+    },
+    "fulcrom_flpvester_proxy": {
+      "address": "0x27E51D2B5A3283bEF4014519F095AB8dDCf023F6",
+      "size": 2112
+    },
+    "fulcrom_rewardrouter_proxy": {
+      "address": "0x133B7f9570b3be8e51CCd5DA4654C3DDe7657Ae1",
+      "size": 2112
+    }
+  }
+}

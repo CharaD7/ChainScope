@@ -20,6 +20,9 @@ if _PARENT not in sys.path:
 
 
 import json
+import os
+import shutil
+import subprocess
 import time
 import typing
 import urllib.request
@@ -254,7 +257,7 @@ def triage(
     timeout: int = typer.Option(200, "--timeout", help="Graph build timeout seconds"),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
 ):
-    """Automate the manual pipeline: scrape scope -> fetch sources -> build graph -> surface.
+    """Automate the manual pipeline: scrape scope -> fetch sources (Sourcify + Git clones) -> build graph -> surface.
 
     Stops at hotspot ranking + rule-hint pre-filter. Verdict + PoC stay manual.
     """
@@ -263,11 +266,15 @@ def triage(
     program_url = f"https://hackenproof.com/programs/{slug}"
     scope = _hacken_scope(program_url)
     addrs = scope["addresses"][: int(max_fetch)]
-    typer.echo(f"{slug}: {len(scope['addresses'])} in-scope addresses, {len(scope['repos'])} repos; fetching {len(addrs)}.")
-    for r in scope["repos"][:10]:
+    repos = scope["repos"]
+    typer.echo(f"{slug}: {len(scope['addresses'])} in-scope addresses, {len(repos)} repos; fetching {len(addrs)}.")
+    for r in repos[:10]:
         typer.echo(f"  repo: {r}")
 
     out = f".chainsource/hacken-{slug}"
+    os.makedirs(out, exist_ok=True)
+
+    # --- Fetch deployed contracts via Sourcify ---
     specs = [f"{a['chain']}:{a['address']}" for a in addrs]
     results = deploy_source.fetch_many(specs, base_out=out) if specs else []
     ok = [r for r in results if "error" not in r]
@@ -276,7 +283,55 @@ def triage(
         typer.echo(f"  [ok] {r['chain']}:{r['address']} files={r['files']}")
     for r in bad:
         typer.echo(f"  [err] {r['spec']}: {r['error']}", err=True)
-    if not ok:
+
+    # --- Clone GitHub repos from program scope ---
+    cloned_repos = []
+    for repo_url in repos[:10]:  # limit to 10 repos to avoid runaway clones
+        repo_name = repo_url.rstrip("/").split("/")[-1]
+        repo_path = os.path.join(out, "repos", repo_name)
+        if not os.path.exists(repo_path):
+            try:
+                subprocess.run(
+                    ["git", "clone", "--depth", "1", repo_url, repo_path],
+                    check=True, capture_output=True, timeout=120,
+                )
+                typer.echo(f"  [cloned] {repo_url}")
+            except subprocess.CalledProcessError as exc:
+                stderr = exc.stderr.decode() if exc.stderr else ""
+                typer.echo(f"  [err] clone failed for {repo_url}: {stderr[:200]}", err=True)
+                continue
+            except subprocess.TimeoutExpired:
+                typer.echo(f"  [err] clone timeout for {repo_url}", err=True)
+                continue
+        cloned_repos.append(repo_path)
+
+    # --- Combine all sources into one build directory ---
+    import pathlib as _pl
+
+    build_dir = os.path.join(out, "all_sources")
+    os.makedirs(build_dir, exist_ok=True)
+
+    def _copy_tree(src: str, dst_root: str):
+        for root, dirs, files in os.walk(src):
+            dirs[:] = [d for d in dirs if d != ".git"]
+            for f in files:
+                sf = os.path.join(root, f)
+                rel = os.path.relpath(sf, src)
+                df = os.path.join(dst_root, rel)
+                os.makedirs(os.path.dirname(df), exist_ok=True)
+                shutil.copy2(sf, df)
+
+    # Copy Sourcify-fetched sources
+    for r in ok:
+        src_dir = r.get("out_dir", "")
+        if src_dir and os.path.isdir(src_dir):
+            _copy_tree(src_dir, build_dir)
+
+    # Copy cloned repos
+    for rp in cloned_repos:
+        _copy_tree(rp, build_dir)
+
+    if not ok and not cloned_repos:
         typer.echo("No sources fetched; triage stops here.", err=True)
         raise typer.Exit(1)
 
@@ -285,7 +340,7 @@ def triage(
     db = f"hacken-{slug}.db"
     try:
         data = json.loads(mcp_server.cs_build(
-            repo_path=out, db=db, lang="solidity",
+            repo_path=build_dir, db=db, lang="solidity",
             include_research=False, timeout_seconds=int(timeout), max_failure_examples=5,
         ))
         typer.echo(
@@ -295,8 +350,6 @@ def triage(
     except Exception as exc:  # noqa: BLE001
         typer.echo(f"graph build failed: {exc}", err=True)
         raise typer.Exit(1)
-
-    import subprocess
 
     subprocess.run(
         [sys.executable, "-m", "cli", "surface", "surface", db, "--top", "25", "--json"],
@@ -317,7 +370,7 @@ def triage(
         )
     typer.echo("Next: read flagged functions, adjudicate vs program rules, build fork PoC for survivors.")
     if json_output:
-        typer.echo(json.dumps({"scope": scope, "fetched": len(ok), "errors": len(bad), "hotspots": hotspots}, indent=2))
+        typer.echo(json.dumps({"scope": scope, "fetched": len(ok), "errors": len(bad), "cloned_repos": len(cloned_repos), "hotspots": hotspots}, indent=2))
 
 
 def _to_float(v: typing.Any) -> float:

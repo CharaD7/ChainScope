@@ -1,0 +1,292 @@
+{
+  "01e33667": [
+    "withdrawToken(address,address,uint256)"
+  ],
+  "01ffc9a7": [
+    "supportsInterface(bytes4)",
+    "pizza_mandate_apology(uint256)"
+  ],
+  "057987e8": [],
+  "07bd0265": [
+    "EXECUTOR_ROLE()"
+  ],
+  "0863c37a": [],
+  "0901b116": [
+    "buy(uint256,uint256,address,address,address,uint256)"
+  ],
+  "09c8962c": [
+    "setGradThreshold(uint256)"
+  ],
+  "0da330c3": [],
+  "0ec43da6": [
+    "esFul()"
+  ],
+  "0f5719e3": [
+    "flpVester()"
+  ],
+  "1083f761": [
+    "assetToken()"
+  ],
+  "12d43a51": [
+    "gov()"
+  ],
+  "1999fa6c": [
+    "stakeEsFul(uint256)"
+  ],
+  "1af276a6": [
+    "batchCompoundForAccounts(address[])"
+  ],
+  "1c3e8c1f": [
+    "bonusFulTracker()"
+  ],
+  "1cd26b13": [
+    "mintAndStakeFlp(address,uint256,uint256,uint256)"
+  ],
+  "248a9ca3": [
+    "getRoleAdmin(bytes32)"
+  ],
+  "2a9f4083": [
+    "compoundForAccount(address)"
+  ],
+  "2afaca20": [
+    "buy(uint256,address,uint256)"
+  ],
+  "2f2ff15d": [
+    "grantRole(bytes32,address)"
+  ],
+  "30b70002": [
+    "handleRewards(bool,bool,bool,bool,bool,bool,bool)"
+  ],
+  "36568abe": [
+    "renounceRole(bytes32,address)"
+  ],
+  "36cfb374": [],
+  "378dc3dc": [
+    "initialSupply()"
+  ],
+  "392e53cd": [
+    "isInitialized()"
+  ],
+  "3f0de1a5": [],
+  "3fa41143": [],
+  "3fc8cef3": [
+    "weth()"
+  ],
+  "42621c8d": [],
+  "45608d00": [
+    "getAmountsOut(address,address,uint256)"
+  ],
+  "485cc955": [
+    "initialize(address,address)",
+    "watch_tg_invmru_7bd442a(uint256,address,uint256)",
+    "watch_tg_invmru_10757d42(bool,bool)"
+  ],
+  "4864ce25": [
+    "flpManager()"
+  ],
+  "4e71d92d": [
+    "claim()"
+  ],
+  "4f1ef286": [
+    "upgradeToAndCall(address,bytes)",
+    "upgradeToAndCall_23573451()"
+  ],
+  "4f7041a5": [
+    "buyTax()"
+  ],
+  "504a565c": [],
+  "508bbbfc": [
+    "stakeFul(uint256)"
+  ],
+  "52d1902d": [
+    "proxiableUUID()"
+  ],
+  "574f2ba3": [
+    "allPairsLength()",
+    "join_tg_invmru_haha_464b02d(address,bool,address)"
+  ],
+  "5ca57ec7": [
+    "claimEsFul()"
+  ],
+  "62dfd9c3": [
+    "bnFul()"
+  ],
+  "68a4c8b7": [
+    "isGraduated(address)"
+  ],
+  "6edd12e0": [
+    "gradThreshold()"
+  ],
+  "70e661b3": [
+    "curvePair(address)"
+  ],
+  "715018a6": [
+    "renounceOwnership()"
+  ],
+  "735de9f7": [
+    "uniswapRouter()"
+  ],
+  "75b238fc": [
+    "ADMIN_ROLE()"
+  ],
+  "7a1ac61e": [
+    "initialize(address,uint256,uint256)"
+  ],
+  "7acf6337": [
+    "setTaxParams(address,uint256,uint256)"
+  ],
+  "7bd23cc9": [
+    "flp()"
+  ],
+  "7c13774b": [
+    "tokenInfos(uint256)"
+  ],
+  "800eabe5": [
+    "unstakeAndRedeemFlpETH(uint256,uint256,address)"
+  ],
+  "8129fc1c": [
+    "initialize()"
+  ],
+  "83b36a1d": [
+    "batchStakeFulForAccount(address[],uint256[])"
+  ],
+  "86a35f25": [
+    "MAX_TAX()"
+  ],
+  "8a038a54": [
+    "sell(uint256,uint256,address,uint256)"
+  ],
+  "8aabdb8b": [
+    "initialize(address,address,address,uint256,uint256,uint256,address,uint256)"
+  ],
+  "8aeda25a": [
+    "CREATOR_ROLE()"
+  ],
+  "8da5cb5b": [
+    "owner()",
+    "ideal_warn_timed(uint256,uint128)"
+  ],
+  "91d14854": [
+    "hasRole(bytes32,address)"
+  ],
+  "96c4b247": [],
+  "9a3ccd0f": [],
+  "9dd9d0fd": [
+    "profile(address)"
+  ],
+  "a217fddf": [
+    "DEFAULT_ADMIN_ROLE()"
+  ],
+  "a799d975": [
+    "feeFlpTracker()"
+  ],
+  "a932492f": [
+    "K()"
+  ],
+  "ad4cb1cc": [],
+  "ae3e584c": [
+    "stakeFulForAccount(address,uint256)"
+  ],
+  "b4f2e8b8": [
+    "setFee(uint256,address)"
+  ],
+  "b73149e1": [
+    "fulVester()"
+  ],
+  "b91ac788": [
+    "pairs(uint256)"
+  ],
+  "ba37fd38": [
+    "addInitialLiquidity(address,uint256,uint256)"
+  ],
+  "bcea2645": [
+    "unstakeAndRedeemFlp(address,uint256,uint256,address)"
+  ],
+  "bea9849e": [
+    "setUniswapRouter(address)"
+  ],
+  "c0d78655": [
+    "setRouter(address)"
+  ],
+  "c34db17b": [
+    "unstakeEsFul(uint256)"
+  ],
+  "c35066c4": [
+    "feeFulTracker()"
+  ],
+  "c36fe3d6": [
+    "profiles(uint256)"
+  ],
+  "c45a0155": [
+    "factory()",
+    "transfer_attention_tg_invmru_ec11fa8(uint256,bool)"
+  ],
+  "c7095255": [],
+  "c9c65396": [
+    "createPair(address,address)",
+    "join_tg_invmru_haha_f2c3308(uint256,address,address)"
+  ],
+  "cc1776d3": [
+    "sellTax()"
+  ],
+  "cc489688": [
+    "setAssetRate(uint256)"
+  ],
+  "cfad57a2": [
+    "setGov(address)"
+  ],
+  "d294f093": [
+    "claimFees()"
+  ],
+  "d2c4967c": [
+    "stakedFulTracker()"
+  ],
+  "d4b61e5d": [
+    "stakedFlpTracker()"
+  ],
+  "d547741f": [
+    "revokeRole(bytes32,address)"
+  ],
+  "d7c8747a": [],
+  "ddca3f43": [
+    "fee()"
+  ],
+  "e13378f3": [
+    "initRewardRouter((address,address,address,address,address,address,address,address,address,address,address,address,address))"
+  ],
+  "e15ad37e": [
+    "ful()"
+  ],
+  "e1b9db89": [
+    "pendingReceivers(address)"
+  ],
+  "e2ad37b0": [
+    "taxVault()"
+  ],
+  "e6e43905": [],
+  "e8e6ed69": [
+    "assetRate()"
+  ],
+  "ed329018": [
+    "unstakeFul(uint256)"
+  ],
+  "f2fde38b": [
+    "transferOwnership(address)",
+    "_SIMONdotBLACK_(int8[],uint256,address,bytes8,int96)"
+  ],
+  "f5dab711": [
+    "tokenInfo(address)"
+  ],
+  "f69e2046": [
+    "compound()"
+  ],
+  "f887ea40": [
+    "router()"
+  ],
+  "fd34119c": [
+    "mintAndStakeFlpETH(uint256,uint256)"
+  ],
+  "ff6d8d05": [
+    "graduate(address)"
+  ]
+}
