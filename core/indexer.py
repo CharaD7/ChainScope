@@ -513,7 +513,7 @@ class Indexer:
             from core.web3.java import JavaExtractor
             return JavaExtractor()
         if chain == "move":
-            from core.web3.project_langs import MoveExtractor
+            from core.web3.move import MoveExtractor
             return MoveExtractor()
         if chain == "clarity":
             from core.web3.project_langs import ClarityExtractor

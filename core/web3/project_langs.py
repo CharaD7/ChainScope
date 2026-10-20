@@ -351,12 +351,62 @@ class TextProjectExtractor(BaseExtractor):
         return result
 
 
+MOVE_CAPABILITY_HINTS = (
+    "AdminCap", "Publisher", "TreasuryCap", "FeeCollector", "Coin<",
+    "Object", "UID", "Ticket<", "Authenticator", "SharedObject",
+    "admin_cap", "publisher", "treasury_cap", "fee_collector",
+)
+
+# Move-specific access control capability patterns
+MOVE_ACCESS_CONTROL_PATTERNS = (
+    "&AdminCap", "&Publisher", "&TreasuryCap", "&FeeCollector",
+    "&Coin<", "&Object", "&UID", "&Ticket<", "&Authenticator",
+    "AdminCap", "Publisher", "TreasuryCap", "FeeCollector",
+)
+
+# Role check function names used in Cetus and other Move projects
+MOVE_ROLE_CHECK_FUNCS = (
+    "check_pool_manager_role", "check_protocol_fee_claim_role",
+    "check_rewarder_manager_role", "check_partner_manager_role",
+    "check_emergency_pause_role", "check_emergency_unpause_role",
+    "is_pool_manager", "is_allow_add_liquidity", "check_admin",
+    "check_owner", "only_owner", "require_owner", "require_admin",
+)
+
+# Sui framework patterns for access control
+SUI_ACCESS_CONTROL_PATTERNS = (
+    "tx_context::sender", "tx_context", "TxContext",
+    "object::id", "object::new", "transfer::public_transfer",
+    "transfer::transfer", "package::claim",
+)
+
+# 21 classes of vulnerability detection (parity with Solidity extractor)
+MOVE_RISK_KEYWORDS = {
+    "signature_risk": ("ecrecover", "sign", "verify", "recover"),
+    "oracle_risk": ("price", "oracle", "price_feed", "spot_price", "twap"),
+    "timestamp_dependence": ("timestamp_seconds", "timestamp_ms", "sui::clock"),
+    "unsafe_downcast": ("u8(", "u16(", "u32(", "u64(", "u128(", "as u8", "as u16", "as u32", "as u64", "as u128"),
+    "unchecked_arithmetic": ("unchecked",),
+    "dos_risk": ("while", "loop", "for ", "vector::length"),
+    "flash_loan_risk": ("flash_loan", "flash_swap", "flash_mint"),
+    "erc_callback_risk": ("coin_receive", "on_receive", "tokensReceived", "onERC"),
+    "unchecked_erc20": ("coin::transfer", "coin::transfer_signed", "balance::zero"),
+    "precision_risk": (" / ", "div_"),
+    "frontrun_risk": ("approve", "set_approval"),
+    "reentrancy_risk": ("borrow_global_mut", "move_from", "move_to"),
+    "cross_reentrancy": ("public_transfer", "transfer::transfer"),
+    "proxy_risk": ("initialize", "__init", "upgrade", "set_implementation"),
+}
+
 class MoveExtractor(TextProjectExtractor):
     language = "move"
 
+    # Move capability types that function as access control (Move equivalent of onlyOwner/onlyRole)
+    CAPABILITY_PARAMS = MOVE_ACCESS_CONTROL_PATTERNS
+
     def _containers(self, text: str, file_path: str) -> list[dict]:
         out = []
-        for m in re.finditer(r"(?m)^\s*(?:public\s+)?module\s+([A-Za-z_]\w*(?:::[A-Za-z_]\w*)?)\s*[;{]", text):
+        for m in re.finditer(r"(?m)^\s*(?:public\s+)?(?:entry\s+)?module\s+([A-Za-z_]\w*(?:::[A-Za-z_]\w*)?)\s*[;{]", text):
             out.append({
                 "label": m.group(1), "type": "module",
                 "line": _line_for_offset(text, m.start()),
@@ -365,24 +415,41 @@ class MoveExtractor(TextProjectExtractor):
         return out
 
     def _state_declarations(self, text: str, scope: str) -> list[str]:
-        return re.findall(r"(?m)^\s*(?:public\s+)?struct\s+([A-Za-z_]\w*)\b", text)
+        return re.findall(r"(?m)^\s*(?:public\s+)?(?:friend\s+)?struct\s+([A-Za-z_]\w*)\b", text)
 
     def _functions(self, text: str, file_path: str, containers: list[dict]) -> list[FunctionSpan]:
         spans = []
+        # Match: [public] [entry] fun <name> [ generics ] ( params )
         pattern = re.compile(
-            r"(?m)^\s*((?:public(?:\([^)]*\))?\s+)?(?:entry\s+)?(?:public\s+entry\s+)?)fun\s+([A-Za-z_]\w*)\s*(?:<[^>{}]*>)?\s*\("
+            r"(?m)^\s*(?:public\s+)?(?:entry\s+)?fun\s+([A-Za-z_]\w*)\s*(?:<[^>{}]*>)?\s*\("
         )
         for m in pattern.finditer(text):
-            prefix = m.group(1) or ""
+            prefix = m.group(0) or ""
             body, end = _brace_body(text, m.end())
+            # Determine visibility from the full matched prefix text
             if "entry" in prefix:
                 vis = "external"
             elif "public" in prefix:
                 vis = "public"
             else:
                 vis = "private"
+            # Find the matching closing paren for the parameter list
+            param_start = m.end()
+            depth = 1
+            param_end = param_start
+            while depth > 0 and param_end < len(text):
+                if text[param_end] == '(':
+                    depth += 1
+                elif text[param_end] == ')':
+                    depth -= 1
+                param_end += 1
+            sig_text = text[m.start():param_end]
+            # Detect capability parameters (Move access control)
+            has_capability = any(cap in sig_text for cap in self.CAPABILITY_PARAMS)
+            if has_capability:
+                vis += "+capability"
             spans.append(FunctionSpan(
-                name=m.group(2), visibility=vis,
+                name=m.group(1), visibility=vis,
                 start_line=_line_for_offset(text, m.start()),
                 end_line=_line_for_offset(text, end),
                 signature=text[m.start():_line_end(text, m.end())].strip(),
@@ -395,6 +462,11 @@ class MoveExtractor(TextProjectExtractor):
         names = re.findall(r"\b(?:move_to|move_from|borrow_global_mut)\s*<\s*([^>]+)>", span.body)
         if "transfer::" in span.body or "public_transfer" in span.body:
             names.append("asset_transfer")
+        # coin::transfer, coin::transfer_signed are also state writes
+        if re.search(r"\bcoin::transfer\b", span.body):
+            names.append("coin_transfer")
+        if re.search(r"\bbalance::\w+", span.body):
+            names.append("balance_write")
         return names
 
     def _state_reads(self, span: FunctionSpan) -> list[str]:
@@ -402,10 +474,172 @@ class MoveExtractor(TextProjectExtractor):
 
     def _metadata(self, span: FunctionSpan) -> dict:
         meta = super()._metadata(span)
+        body = span.body
+        sig = span.signature
+
+        # --- Move entry point (public/entry fun) ---
         if re.search(r"\b(entry\s+fun|public\s+entry\s+fun)", span.signature):
             meta["move_entry"] = True
+
+        # --- Capability-based access control (Move equivalent of onlyOwner) ---
+        has_capability = any(cap in sig for cap in self.CAPABILITY_PARAMS)
+        has_role_check = any(kw in body for kw in MOVE_ROLE_CHECK_FUNCS)
+        if has_capability or has_role_check:
+            meta["capability_access_control"] = True
+            meta["role_guards"] = sorted(set(meta.get("role_guards", [])) | {"capability_check"})
+
+        # --- Move entry (external) ---
         if "transfer::" in span.body or "public_transfer" in span.body:
             meta["cross_contract_calls"] = ["transfer_module"]
+
+        # --- 21 CLASS DETECTIONS (parity with Solidity extractor) ---
+
+        # 1. Signature replay (missing nonce/chain_id/domain separator)
+        sig_risks = []
+        if "ecrecover" in body or "recover" in body.lower() or "secp256k1" in body.lower():
+            has_nonce = any(n in body.lower() for n in ("nonce", "nonces"))
+            has_chain = ("chain_id" in body.lower() or "chainid" in body.lower())
+            has_domain = ("DOMAIN_SEPARATOR" in body or "domainSeparator" in body or "_domainSeparator" in body or "eip712" in body.lower())
+            if not has_nonce:
+                sig_risks.append("missing_nonce")
+            if not has_chain and not has_domain:
+                sig_risks.append("missing_chain_id_or_domain")
+            if sig_risks:
+                meta["signature_risk"] = sig_risks
+
+        # 2. Timestamp dependence (sui::clock::timestamp_seconds())
+        ts_risks = []
+        if "timestamp_seconds" in body or "timestamp_ms" in body or "sui::clock" in body:
+            ts_comparisons = re.findall(
+                r'(timestamp_seconds\s*(?:>=|<=|!=|==|>|<)\s*\w+|\w+\s*(?:>=|<=|!=|==|>|<)\s*timestamp_seconds)',
+                body
+            )
+            ts_arithmetic = re.findall(
+                r'(timestamp_seconds\s*[+\-*/]\s*\w+|\w+\s*[+\-*/]\s*timestamp_seconds)',
+                body
+            )
+            for m in ts_comparisons + ts_arithmetic:
+                ts_risks.append({"type": "timestamp_comparison", "expression": m.strip()})
+            if ts_risks:
+                meta["timestamp_dependence"] = ts_risks
+
+        # 3. Unchecked arithmetic / unsafe downcasting (u8/u16/u32/u64/u128 narrowing)
+        unsafe_casts = []
+        for small in ("u8(", "u16(", "u32(", "u64(", "u128("):
+            if small in body:
+                unsafe_casts.append({"type": small.rstrip("("), "line": 0})
+        if unsafe_casts:
+            meta["unsafe_downcast"] = unsafe_casts
+
+        # 4. Oracle / price manipulation spot reads
+        oracle_risks = []
+        if re.search(r"\b(balance::zero|coin::value|price|oracle|spot_price|twap)\b", body):
+            if "price" in body.lower() or "oracle" in body.lower():
+                oracle_risks.append({"type": "spot_price_read", "call": "price_oracle", "line": 0})
+            if oracle_risks:
+                meta["oracle_risk"] = oracle_risks
+
+        # 5. DoS risks (unbounded loops, external calls in loops)
+        dos_risks = []
+        loops = re.findall(r"(?:while\s*\(|for\s*\(|loop\s*\{)", body)
+        if loops:
+            for lp in loops:
+                dos_risks.append({"type": "unbounded_loop", "bound": "vector::length", "line": 0})
+                break
+        if re.search(r"\b(coin::transfer|public_transfer|transfer::transfer)\b", body) and loops:
+            dos_risks.append({"type": "external_call_in_loop", "call": "coin_transfer", "line": 0})
+        if dos_risks:
+            meta["dos_risk"] = dos_risks
+
+        # 6. Flash loan risk
+        if re.search(r"\b(flash_loan|flash_swap|flash_mint)\b", body):
+            meta["flash_loan_risk"] = ["flash_loan_entry"]
+
+        # 7. ERC callback risk (coin receive callbacks)
+        if re.search(r"\b(coin_receive|on_receive|tokensReceived|onERC)\b", body, re.IGNORECASE):
+            meta["erc_callback_risk"] = ["coin_receive_entry"]
+
+        # 8. Unchecked ERC20 equivalent (coin transfer without return value check)
+        if re.search(r"\bcoin::transfer\b", span.body) and not re.search(r"\b(assert!|abort!|if\s*\(.*!)\s*", span.body):
+            meta["unchecked_erc20"] = [{"target": "coin::transfer", "line": 0}]
+
+        # 9. Precision risk (division before multiplication)
+        if re.search(r"/\s*\w+\s*\*", body):
+            meta["precision_risk"] = [{"type": "division_before_multiplication", "expression": "/ * pattern", "line": 0}]
+
+        # 10. Frontrun risk (approve without zero-set)
+        if re.search(r"\bapprove\b", body) and "approve(0" not in body and "forceApprove" not in body:
+            meta["frontrun_risk"] = [{"type": "approve_race", "target": "approve", "line": 0}]
+
+        # 11. tx.origin equivalent (tx_context::sender without validation)
+        if "tx_context::sender(ctx)" in body and "check_" not in body and "assert!" not in body and "abort!" not in body:
+            meta["tx_origin"] = True
+
+        # 12. Proxy/upgrade risk (init without initializer)
+        if span.name in ("init", "__init") and "initializer" not in body and "onlyInitializing" not in body:
+            meta["proxy_risk"] = ["initialize_without_initializer_modifier"]
+        if "upgrade" in body.lower() or "set_implementation" in body:
+            meta["proxy_risk"] = meta.get("proxy_risk", []) + ["contains_upgrade_logic"]
+
+        # 13. Privileged operations / unguarded privileged
+        privileged_ops = []
+        if re.search(r"\b(upgrade|implementation_change|delegate_execution|shutdown|pause|unpause)\b", body):
+            privileged_ops.append("upgrade_surface")
+        if span.visibility in ("external", "public") and not has_capability and not has_role_check:
+            meta["unguarded_privileged_operation"] = True
+        if privileged_ops:
+            meta["privileged_operations"] = privileged_ops
+            if any(op in ("upgrade", "implementation_change", "delegate_execution", "shutdown") for op in privileged_ops):
+                meta["upgrade_surface"] = True
+
+        # 14. Reentrancy risk (Move borrow_global_mut/move_from/move_to)
+        if re.search(r"\b(borrow_global_mut|move_from|move_to)\b", body):
+            meta["reentrancy_risk"] = ["global_mut_access"]
+        if re.search(r"\b(public_transfer|transfer::transfer)\b", body):
+            meta["cross_reentrancy"] = ["public_transfer"]
+
+        # 15. No input validation (external/public state-changing without assert/abort/if)
+        if span.visibility in ("external", "public") and not has_capability and not has_role_check:
+            # Check if function has parameters beyond TxContext
+            has_params = bool(re.search(r"\)\s*\{", body)) and span.name not in ("init",)
+            validation_kw = ("assert!", "abort!", "if (", "assert_eq!", "debug_assert!")
+            has_validation = any(kw in body for kw in validation_kw)
+            if has_params and not has_validation:
+                meta["no_input_validation"] = True
+
+        # --- Move-specific additional detections ---
+
+        # 16. Public transfer without sender authorization check
+        if re.search(r"\b(transfer::public_transfer|transfer::transfer)\b", body):
+            if not re.search(r"\bcheck_\w+_role\b|\bassert!\b.*\bsender\b|\bassert!\b.*\bowner\b", body):
+                meta["unauthorized_transfer"] = ["public_transfer_without_auth_check"]
+
+        # 17. Shared object mutation without capability check
+        if "public_share_object" in body and "check_" not in body and "assert!" not in body:
+            meta["unsafe_share_object"] = ["share_object_without_auth_check"]
+
+        # 18. Object creation without proper authorization
+        if "object::new(ctx)" in body and span.visibility in ("external", "public"):
+            if not has_capability and not has_role_check:
+                meta["unauthorized_object_creation"] = ["object_new_without_auth"]
+
+        # 19. Package upgrade without publisher check
+        if "package::upgrade" in body or "package::publish" in body:
+            if "check_" not in body and "assert!" not in body:
+                meta["unsafe_package_upgrade"] = ["package_upgrade_without_auth"]
+
+        # 20. Flash loan without reentrancy protection
+        if re.search(r"\b(flash_loan|flash_swap)\b", body):
+            if "nonReentrant" not in body and "reentrancy_guard" not in body and "check_" not in body:
+                meta["unprotected_flash_loan"] = ["flash_loan_without_reentrancy_guard"]
+
+        # 21. Missing event emission on state-changing operations
+        if span.visibility in ("external", "public") and not has_capability and not has_role_check:
+            state_changing = re.search(r"\b(coin::transfer|public_transfer|move_to|move_from|borrow_global_mut)\b", body)
+            has_event = "event::emit" in body
+            if state_changing and not has_event:
+                meta["missing_event_emission"] = ["state_change_without_event"]
+
         return meta
 
 
